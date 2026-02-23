@@ -126,7 +126,7 @@ class ScraperViewSet(viewsets.ViewSet):
         serializer = ScrapeResultSerializer(queryset, many=True)
         return Response(serializer.data)
     
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], url_path='user_history')
     def api_historico_usuario(request):
         criterio = request.GET.get('query', '').strip()
         
