@@ -88,26 +88,12 @@ class ScraperViewSet(viewsets.ViewSet):
         
         return Response({'error': 'No se pudo iniciar el hilo. Revisa las llaves.'}, status=400)
 
-    @action(detail=False, methods=['get'])
-    def latest_results(self, request):
-        since = request.query_params.get('since')
-
-        queryset = ScrapeResult.objects.all().order_by('-created_at')
-
-        if since:
-            try:
-                queryset = queryset.filter(created_at__gte=since)
-            except Exception:
-                pass
-
-        queryset = queryset[:10000]
-        serializer = ScrapeResultSerializer(queryset, many=True)
-        return Response(serializer.data)
     
     @action(detail=False, methods=['get'])
     def latest_results(self, request):
         since = request.query_params.get('since')
         platform = request.query_params.get('platform')
+        limit = int(request.query_params.get('limit', 1000))
 
         queryset = ScrapeResult.objects.all().order_by('-created_at')
 
@@ -118,47 +104,32 @@ class ScraperViewSet(viewsets.ViewSet):
             try:
                 queryset = queryset.filter(created_at__gt=since)
             except Exception as e:
-                print(f"Error filtrando por fecha: {e}")
-                pass
+                logger.error(f"Error filtrando por fecha: {e}")
 
-        limit = int(request.query_params.get('limit', 100))
         queryset = queryset[:limit]
-
         serializer = ScrapeResultSerializer(queryset, many=True)
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'], url_path='user_history')
-    def api_historico_usuario(request):
+    def api_historico_usuario(self, request):
         try:
             criterio = request.GET.get('query', '').strip()
             
+            # Validación para evitar que el * rompa el Regex de SQL
             if criterio == '*' or criterio == '' or criterio == '.*':
-                posts = ScrapeResult.objects.all().order_by('-created_at')
+                posts = ScrapeResult.objects.all().order_by('-created_at')[:500]
             else:
                 posts = ScrapeResult.objects.filter(
                     Q(username__iregex=criterio)
-                ).order_by('-created_at')
+                ).order_by('-created_at')[:500]
 
-            data = []
-            for post in posts:
-                data.append({
-                    'id': post.id,
-                    'username': str(post.username) if post.username else "unknown",
-                    'platform': str(post.platform) if post.platform else "unknown",
-                    'description': str(post.description or ""),
-                    'likes': int(post.likes or 0),
-                    'comments': int(post.comments or 0),
-                    'post_date': str(post.post_date or ""),
-                    'sentiment': str(post.sentiment or "neutral"),
-                    'created_at': post.created_at.strftime("%Y-%m-%d %H:%M") if post.created_at else ""
-                })
-
-            return JsonResponse(data, safe=False)
+            # Usamos el Serializer para evitar errores de formato manual
+            serializer = ScrapeResultSerializer(posts, many=True)
+            return Response(serializer.data)
 
         except Exception as e:
-            # Esto enviará el error real a los logs de Azure
             logger.error(f"Error en api_historico_usuario: {str(e)}")
-            return JsonResponse({'error': f"Error interno: {str(e)}"}, status=500)
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
