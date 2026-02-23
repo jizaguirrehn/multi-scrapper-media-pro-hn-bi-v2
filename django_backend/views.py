@@ -126,32 +126,37 @@ class ScraperViewSet(viewsets.ViewSet):
         serializer = ScrapeResultSerializer(queryset, many=True)
         return Response(serializer.data)
     
-    @action(detail=False, methods=['get'])
-    def user_history(self, request):
-        criterio = request.GET.get('query', '').strip()
-        
-        if criterio == '*' or criterio == '':
-            posts = ScrapeResult.objects.all().order_by('-created_at')
-        else:
-            posts = ScrapeResult.objects.filter(
-                Q(username__iregex=criterio)
-            ).order_by('-created_at')
+    @action(detail=False, methods=['get'], url_path='user_history')
+    def user_history(request):
+        try:
+            criterio = request.GET.get('query', '').strip()
+            
+            if criterio == '*' or criterio == '':
+                posts = ScrapeResult.objects.all().order_by('-created_at')
+            else:
+                posts = ScrapeResult.objects.filter(
+                    Q(username__iregex=criterio)
+                ).order_by('-created_at')
 
-        data = []
-        for post in posts:
-            data.append({
-                'id': post.id,
-                'username': post.username,
-                'platform': post.platform,
-                'description': post.description,
-                'likes': post.likes,
-                'comments': post.comments,
-                'post_date': post.post_date,
-                'sentiment': post.sentiment,
-                'created_at': post.created_at.strftime("%Y-%m-%d %H:%M")
-            })
+            data = []
+            for post in posts:
+                data.append({
+                    'id': post.id,
+                    'username': post.username,
+                    'platform': getattr(post, 'platform', 'N/A'),
+                    'description': getattr(post, 'description', ''),
+                    'likes': getattr(post, 'likes', 0),
+                    'comments': getattr(post, 'comments', 0),
+                    'post_date': getattr(post, 'post_date', 'N/A'),
+                    'sentiment': getattr(post, 'sentiment', 'neutral'),
+                    'created_at': post.created_at.strftime("%Y-%m-%d %H:%M") if post.created_at else "N/A"
+                })
 
-        return JsonResponse(data, safe=False)
+            return JsonResponse(data, safe=False)
+            
+        except Exception as e:
+            print(f"ERROR EN USER_HISTORY: {str(e)}")
+            return JsonResponse({'error': str(e)}, status=500)
     
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
