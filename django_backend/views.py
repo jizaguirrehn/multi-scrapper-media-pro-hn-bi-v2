@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -10,13 +11,13 @@ from django.utils import timezone
 import threading
 import datetime
 from django.http import JsonResponse
-from django.db.models import Q
+import logging
+
+logger = logging.getLogger(__name__)
 
 from django_backend.scripts.script_ig import iniciar as iniciar_ig
 from django_backend.scripts.script_tk import iniciar as iniciar_tk
 from django_backend.scripts.script_x import iniciar as iniciar_x
-from django_backend.scripts.script_metricas import mostrar_metricas
-from django_backend.scripts.script_historico import mostrar_historico
 
 class ScraperViewSet(viewsets.ViewSet):
 
@@ -27,10 +28,9 @@ class ScraperViewSet(viewsets.ViewSet):
         try:
             for platform, purposes in data.items():
                 for purpose, keys in purposes.items():
-                    # Marcamos las llaves viejas como inactivas para esta plataforma/propósito
+                    logger.info(f"Updating keys for platform: {platform}, purpose: {purpose}")
                     ScraperKey.objects.filter(platform=platform, purpose=purpose).update(is_active=False)
                     
-                    # Creamos las nuevas
                     for k in keys:
                         if k.strip():
                             ScraperKey.objects.create(
@@ -41,6 +41,7 @@ class ScraperViewSet(viewsets.ViewSet):
                             )
             return Response({'status': 'Keys updated successfully'}, status=status.HTTP_200_OK)
         except Exception as e:
+            logger.error(f"Error updating keys: {e}")
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
     @action(detail=False, methods=['post'])
@@ -127,11 +128,11 @@ class ScraperViewSet(viewsets.ViewSet):
         return Response(serializer.data)
     
     @action(detail=False, methods=['get'], url_path='user_history')
-    def user_history(request):
+    def api_historico_usuario(request):
         try:
             criterio = request.GET.get('query', '').strip()
             
-            if criterio == '*' or criterio == '':
+            if criterio == '*' or criterio == '' or criterio == '.*':
                 posts = ScrapeResult.objects.all().order_by('-created_at')
             else:
                 posts = ScrapeResult.objects.filter(
@@ -142,21 +143,22 @@ class ScraperViewSet(viewsets.ViewSet):
             for post in posts:
                 data.append({
                     'id': post.id,
-                    'username': post.username,
-                    'platform': getattr(post, 'platform', 'N/A'),
-                    'description': getattr(post, 'description', ''),
-                    'likes': getattr(post, 'likes', 0),
-                    'comments': getattr(post, 'comments', 0),
-                    'post_date': getattr(post, 'post_date', 'N/A'),
-                    'sentiment': getattr(post, 'sentiment', 'neutral'),
-                    'created_at': post.created_at.strftime("%Y-%m-%d %H:%M") if post.created_at else "N/A"
+                    'username': str(post.username) if post.username else "unknown",
+                    'platform': str(post.platform) if post.platform else "unknown",
+                    'description': str(post.description or ""),
+                    'likes': int(post.likes or 0),
+                    'comments': int(post.comments or 0),
+                    'post_date': str(post.post_date or ""),
+                    'sentiment': str(post.sentiment or "neutral"),
+                    'created_at': post.created_at.strftime("%Y-%m-%d %H:%M") if post.created_at else ""
                 })
 
             return JsonResponse(data, safe=False)
-            
+
         except Exception as e:
-            print(f"ERROR EN USER_HISTORY: {str(e)}")
-            return JsonResponse({'error': str(e)}, status=500)
+            # Esto enviará el error real a los logs de Azure
+            logger.error(f"Error en api_historico_usuario: {str(e)}")
+            return JsonResponse({'error': f"Error interno: {str(e)}"}, status=500)
     
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
