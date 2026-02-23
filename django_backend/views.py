@@ -9,11 +9,14 @@ from django.db.models.functions import ExtractWeekDay
 from django.utils import timezone
 import threading
 import datetime
+from django.http import JsonResponse
+from django.db.models import Q
 
 from django_backend.scripts.script_ig import iniciar as iniciar_ig
 from django_backend.scripts.script_tk import iniciar as iniciar_tk
 from django_backend.scripts.script_x import iniciar as iniciar_x
 from django_backend.scripts.script_metricas import mostrar_metricas
+from django_backend.scripts.script_historico import mostrar_historico
 
 class ScraperViewSet(viewsets.ViewSet):
 
@@ -122,6 +125,33 @@ class ScraperViewSet(viewsets.ViewSet):
 
         serializer = ScrapeResultSerializer(queryset, many=True)
         return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def api_historico_usuario(request):
+        criterio = request.GET.get('query', '').strip()
+        
+        if criterio == '*' or criterio == '':
+            posts = ScrapeResult.objects.all().order_by('-created_at')
+        else:
+            posts = ScrapeResult.objects.filter(
+                Q(username__iregex=criterio)
+            ).order_by('-created_at')
+
+        data = []
+        for post in posts:
+            data.append({
+                'id': post.id,
+                'username': post.username,
+                'platform': post.platform,
+                'description': post.description,
+                'likes': post.likes,
+                'comments': post.comments,
+                'post_date': post.post_date,
+                'sentiment': post.sentiment,
+                'created_at': post.created_at.strftime("%Y-%m-%d %H:%M")
+            })
+
+        return JsonResponse(data, safe=False)
     
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
