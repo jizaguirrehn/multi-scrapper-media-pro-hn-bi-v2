@@ -57,5 +57,5 @@ jobs:
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v2
         with:
-          app-name: 'multiscrapperultrapropremium4khnunah'
+          app-name: 'webappmultiscrapperultrapropremium4khnunahmegaplus'
           # Ya no usamos publish-profile, el login previo se encarga de la auth
