@@ -66,6 +66,7 @@ else:
     # Desarrollo local
     DB_PATH = BASE_DIR / 'db.sqlite3'
 
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
