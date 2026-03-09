@@ -12,6 +12,7 @@ import threading
 import datetime
 from django.http import JsonResponse
 import logging
+import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -136,12 +137,15 @@ class ScraperViewSet(viewsets.ViewSet):
         total_posts = ScrapeResult.objects.count()
         total_profiles = ScrapeResult.objects.values('username').distinct().count()
 
-        avg_eng = ScrapeResult.objects.filter(followers__gt=0).annotate(
-            rate=ExpressionWrapper(
+        queryset_engagement = ScrapeResult.objects.filter(followers__gt=0).annotate(
+        engagement_val=ExpressionWrapper(
                 (F('likes') + F('comments')) * 100.0 / F('followers'),
                 output_field=FloatField()
             )
-        ).aggregate(Avg('rate'))['rate__avg'] or 0
+        ).values_list('engagement_val', flat=True)
+
+        engagement_list = list(queryset_engagement)
+        median_engagement = round(statistics.median(engagement_list), 2) if engagement_list else 0
 
         dist = ScrapeResult.objects.values('platform').annotate(count=Count('id'))
         platform_distribution = {item['platform']: item['count'] for item in dist}
@@ -163,7 +167,7 @@ class ScraperViewSet(viewsets.ViewSet):
         return Response({
             "total_extracted": total_posts,
             "total_profiles": total_profiles,
-            "avg_engagement": round(avg_eng, 2),
+            "avg_engagement": round(median_engagement, 2),
             "platform_distribution": platform_distribution,
             "weekly_volume": weekly_volume
         })
