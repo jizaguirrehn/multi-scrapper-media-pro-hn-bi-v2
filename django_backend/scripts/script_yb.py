@@ -1,151 +1,268 @@
 import asyncio
 import re
 import logging
-from datetime import datetime, timedelta
+import json
+import requests
+from datetime import datetime
 from django.utils.timezone import make_aware
-from playwright.async_api import async_playwright
 from django_backend.models import ScrapeResult
-from asgiref.sync import sync_to_async
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class YouTubeScraperService:
     def __init__(self):
-        self.hoy = datetime.now().strftime("%Y_%m_%d")
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "es-ES,es;q=0.9"
+        }
+
+    # ------------------------------------------------------------------ #
+    #  PARSERS                                                             #
+    # ------------------------------------------------------------------ #
 
     def _parse_numeric_text(self, text, field_name=""):
-        if not text: return 0
-        clean_text = text.lower().strip().replace('(', '').replace(')', '')
-        
-        # 1. Identificar multiplicador
+        """Convierte strings como '1.2M', '50K' o '125,432' en enteros."""
+        if not text:
+            return 0
+        clean = str(text).lower().strip().replace('(', '').replace(')', '').replace('\xa0', ' ')
+
+        if clean.isdigit():
+            return int(clean)
+
         multiplier = 1
-        if 'm' in clean_text and 'mil' not in clean_text:
-            multiplier = 1000000
-        elif 'k' in clean_text or 'mil' in clean_text:
-            multiplier = 1000
+        if 'm' in clean or 'mill' in clean:
+            multiplier = 1_000_000
+        elif 'k' in clean or 'mil' in clean:
+            multiplier = 1_000
 
-        # 2. Extraer bloque numérico
-        match = re.search(r'([\d\.,]+)', clean_text)
-        if not match: return 0
-        num_str = match.group(1)
+        match = re.search(r'([\d\.,]+)', clean)
+        if not match:
+            return 0
 
-        # 3. Lógica de limpieza inteligente
-        if multiplier > 1:
-            num_str = num_str.replace(',', '.')
-        else:
-            num_str = num_str.replace('.', '').replace(',', '')
+        num_str = (
+            match.group(1).replace(',', '.')
+            if multiplier > 1
+            else match.group(1).replace('.', '').replace(',', '')
+        )
 
         try:
-            val = float(num_str)
-            result = int(val * multiplier)
-            return result
-        except:
+            return int(float(num_str) * multiplier)
+        except ValueError:
             return 0
 
     def _parse_youtube_date(self, date_text):
-        now = datetime.now()
-        units = {'segundo': 'seconds', 'minuto': 'minutes', 'hora': 'hours',
-                 'día': 'days', 'semana': 'weeks', 'mes': 'months', 'año': 'years'}
-        match = re.search(r'(\d+)\s+(\w+)', date_text.lower())
-        if not match: return make_aware(now)
-        quantity = int(match.group(1))
-        unit_text = match.group(2)
-        delta_kwargs = {}
-        for key, value in units.items():
-            if key in unit_text:
-                if value == 'months': delta_kwargs['days'] = quantity * 30
-                elif value == 'years': delta_kwargs['days'] = quantity * 365
-                else: delta_kwargs[value] = quantity
-                break
-        return make_aware(now - timedelta(**(delta_kwargs or {'seconds': 0})))
+        """Devuelve la fecha actual como timezone-aware (ampliar si se necesita parseo real)."""
+        return make_aware(datetime.now())
 
-    def guardar_en_db_sync(self, target, seguidores_raw, fecha_dt, views, likes, comms, desc):
+    # ------------------------------------------------------------------ #
+    #  EXTRACCIÓN DE MÉTRICAS DE UN VIDEO (solo requests)                 #
+    # ------------------------------------------------------------------ #
+
+    def _fetch_video_metrics(self, video_id: str) -> dict:
+        """
+        Descarga la página del video y extrae vistas, likes y comentarios
+        directamente desde ytInitialData / ytInitialPlayerResponse.
+        Devuelve un dict con keys: title, views, likes, comments.
+        """
+        url = f"https://www.youtube.com/watch?v={video_id}"
         try:
-            seguidores_limpios = self._parse_numeric_text(seguidores_raw, "Followers")
+            resp = requests.get(url, headers=self.headers, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            logger.error(f"Error al descargar video {video_id}: {e}")
+            return {"title": "", "views": 0, "likes": 0, "comments": 0}
+
+        # --- Vistas y título desde ytInitialPlayerResponse ---
+        views_raw, title = "0", ""
+        match_player = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});\s*(?:var |</script)', resp.text)
+        if match_player:
+            try:
+                player = json.loads(match_player.group(1))
+                views_raw = player.get("videoDetails", {}).get("viewCount", "0")
+                title     = player.get("videoDetails", {}).get("title", "")
+            except json.JSONDecodeError:
+                pass
+
+        # --- Likes y comentarios desde ytInitialData ---
+        likes_raw, comm_raw = "0", "0"
+        match_data = re.search(r'ytInitialData\s*=\s*({.+?});', resp.text)
+        if match_data:
+            try:
+                data_v = json.loads(match_data.group(1))
+                panels  = data_v.get("engagementPanels", [])
+
+                # Comentarios: primer panel → contextualInfo
+                try:
+                    comm_raw = (
+                        panels[0]
+                        ["engagementPanelSectionListRenderer"]
+                        ["header"]
+                        ["engagementPanelTitleHeaderRenderer"]
+                        ["contextualInfo"]["runs"][0]["text"]
+                    )
+                except (KeyError, IndexError):
+                    pass
+
+                # Likes: panel de descripción estructurada → factoid[0]
+                for panel in panels:
+                    try:
+                        factoid = (
+                            panel
+                            ["engagementPanelSectionListRenderer"]
+                            ["content"]
+                            ["structuredDescriptionContentRenderer"]
+                            ["items"][0]
+                            ["videoDescriptionHeaderRenderer"]
+                            ["factoid"][0]
+                            ["factoidRenderer"]
+                            ["value"]["simpleText"]
+                        )
+                        likes_raw = factoid
+                        break
+                    except (KeyError, IndexError):
+                        continue
+
+            except json.JSONDecodeError:
+                pass
+
+        if not title:
+            title = resp.url  # fallback
+
+        return {
+            "title":    title,
+            "views":    self._parse_numeric_text(views_raw, "views"),
+            "likes":    self._parse_numeric_text(likes_raw, "likes"),
+            "comments": self._parse_numeric_text(comm_raw,  "comments"),
+        }
+
+    # ------------------------------------------------------------------ #
+    #  GUARDADO EN DB                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _guardar_en_db(self, usuario, seguidores_raw, fecha_dt,
+                       views, likes, comments, title):
+        try:
+            seguidores = self._parse_numeric_text(seguidores_raw)
             ScrapeResult.objects.create(
-                platform='yt',
-                username=target,
-                followers=seguidores_limpios,
-                post_date=fecha_dt,
-                likes=likes,
-                comments=comms,
-                views=views,
-                description=desc
+                platform    = "yt",
+                username    = usuario,
+                followers   = seguidores,
+                post_date   = fecha_dt,
+                likes       = likes,
+                comments    = comments,
+                views       = views,
+                description = title,
             )
-            
+            logger.info(
+                f"DB ✔ [{usuario}] {title[:40]!r} | "
+                f"V:{views:,} L:{likes:,} C:{comments:,}"
+            )
         except Exception as e:
-            print(f" Error DB: {e}")
+            logger.error(f"Error al guardar en DB: {e}")
 
-    async def procesar_video(self, context, video_url, usuario, seguidores_raw):
-        """Procesa un video individual en una pestaña nueva."""
-        page = await context.new_page()
+    # ------------------------------------------------------------------ #
+    #  SCRAPING PRINCIPAL                                                  #
+    # ------------------------------------------------------------------ #
+
+    def scrape_and_save(self, usuario: str, max_videos: int = 15):
+        """
+        1. Descarga la página /videos del canal con requests.
+        2. Extrae metadatos y lista de IDs de videos.
+        3. Para cada video: extrae métricas y guarda en DB.
+        """
+        url_canal = f"https://www.youtube.com/@{usuario}/videos"
+        logger.info(f"Conectando a {url_canal} ...")
+
         try:
-            # Bloquear imágenes y fuentes para ganar velocidad
-            await page.route("**/*.{png,jpg,jpeg,svg,woff,woff2}", lambda route: route.abort())
-            
-            await page.goto(video_url, wait_until="domcontentloaded")
-            
-            # Scroll rápido para disparar carga de comentarios
-            await page.mouse.wheel(0, 1200)
-            
-            # Esperar lo mínimo necesario para que los datos existan
-            try:
-                await page.wait_for_selector('h1.ytd-watch-metadata', timeout=5000)
-            except: pass
+            res = requests.get(url_canal, headers=self.headers, timeout=15)
+            res.raise_for_status()
+        except requests.RequestException as e:
+            logger.error(f"Fallo al obtener canal @{usuario}: {e}")
+            return
 
-            video_data = await page.evaluate('''() => {
-                const title = document.querySelector('h1.ytd-watch-metadata')?.innerText || "";
-                const likeText = document.querySelector('segmented-like-dislike-button-view-model')?.innerText || "0";
-                const viewsExact = document.querySelector('#info-container span.style-scope.yt-formatted-string:nth-child(1)')?.innerText || 
-                                   document.querySelector('#metadata-line span:nth-child(1)')?.innerText || "0";
-                const countEl = document.querySelector('ytd-comments-header-renderer #count span:nth-child(1)') || 
-                                document.querySelector('#comments #count yt-formatted-string');
-                return { title, likeText, commText: countEl ? countEl.innerText : "0", viewsExact };
-            }''')
+        match = re.search(r'ytInitialData\s*=\s*({.+?});', res.text)
+        if not match:
+            logger.error("No se encontró ytInitialData en la página del canal.")
+            return
 
-            likes = self._parse_numeric_text(video_data['likeText'], "Likes")
-            comms = self._parse_numeric_text(video_data['commText'], "Comments")
-            vistas = self._parse_numeric_text(video_data['viewsExact'], "Views Exactas")
-            fecha_obj = self._parse_youtube_date("1 día")
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON inválido en ytInitialData: {e}")
+            return
 
-            await sync_to_async(self.guardar_en_db_sync, thread_sensitive=True)(
-                usuario, seguidores_raw, fecha_obj, vistas, likes, comms, video_data['title']
+        # --- Encabezado del canal ---
+        seguidores_raw = "0"
+        try:
+            header_vm    = data["header"]["pageHeaderRenderer"]["content"]["pageHeaderViewModel"]
+            nombre       = header_vm["title"]["dynamicTextViewModel"]["text"]["content"]
+            seguidores_raw = (
+                header_vm["metadata"]
+                ["contentMetadataViewModel"]
+                ["metadataRows"][1]
+                ["metadataParts"][0]
+                ["text"]["content"]
             )
-        finally:
-            await page.close()
+            logger.info(f"Canal: {nombre} | Suscriptores: {seguidores_raw}")
+        except KeyError:
+            logger.warning("No se pudo extraer el encabezado del canal.")
 
-    async def scrape_and_save(self, usuario):
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=['--disable-http2'])
-            context = await browser.new_context(viewport={'width': 1280, 'height': 720}, locale="es-ES")
-            
-            try:
-                main_page = await context.new_page()
-                await main_page.goto(f"https://www.youtube.com/@{usuario}/videos", wait_until="networkidle")
-                
-                await main_page.wait_for_selector('.page-header-view-model-wiz__metadata, #subscriber-count', timeout=5000)
-                seguidores_raw = await main_page.evaluate('''() => {
-                    const allSpans = Array.from(document.querySelectorAll('span'));
-                    const subSpan = allSpans.find(s => s.innerText.toLowerCase().includes('suscriptores'));
-                    return subSpan ? subSpan.innerText : "0";
-                }''')
+        # --- Lista de video IDs ---
+        video_ids = []
+        try:
+            tabs = data["contents"]["twoColumnBrowseResultsRenderer"]["tabs"]
+            video_tab = next(
+                tab for tab in tabs
+                if "richGridRenderer" in tab.get("tabRenderer", {}).get("content", {})
+            )
+            items = video_tab["tabRenderer"]["content"]["richGridRenderer"]["contents"]
 
-                # Obtener links
-                links = await main_page.evaluate('''() => {
-                    return Array.from(document.querySelectorAll('ytd-rich-item-renderer a#video-title-link')).map(a => a.href).slice(0, 5); 
-                }''')
-                await main_page.close()
+            for item in items:
+                if len(video_ids) >= max_videos:
+                    break
+                if "richItemRenderer" in item:
+                    vid = item["richItemRenderer"]["content"]["videoRenderer"]["videoId"]
+                    video_ids.append(vid)
 
-                tareas = [self.procesar_video(context, url, usuario, seguidores_raw) for url in links]
-                await asyncio.gather(*tareas)
+        except (KeyError, StopIteration) as e:
+            logger.error(f"Error al extraer lista de videos: {e}")
+            return
 
-                await browser.close()
-            except Exception as e:
-                logger.error(f"Error en {usuario}: {e}")
-                await browser.close()
+        logger.info(f"{len(video_ids)} videos encontrados para @{usuario}. Procesando...")
 
-def iniciar_yt(usuarios):
+        # --- Procesar cada video ---
+        for video_id in video_ids:
+            metrics  = self._fetch_video_metrics(video_id)
+            fecha_dt = self._parse_youtube_date("")
+
+            self._guardar_en_db(
+                usuario      = usuario,
+                seguidores_raw = seguidores_raw,
+                fecha_dt     = fecha_dt,
+                views        = metrics["views"],
+                likes        = metrics["likes"],
+                comments     = metrics["comments"],
+                title        = metrics["title"],
+            )
+
+
+# ------------------------------------------------------------------ #
+#  PUNTO DE ENTRADA                                                    #
+# ------------------------------------------------------------------ #
+
+def iniciar_yt(usuarios, max_videos: int = 15):
+    """
+    Acepta un string o lista de usernames de YouTube y lanza el scraping.
+    Ejemplo:
+        iniciar_yt("shinfujiyamaReal")
+        iniciar_yt(["shinfujiyamaReal", "otroCanal"])
+    """
     scraper = YouTubeScraperService()
-    for u in (usuarios if isinstance(usuarios, list) else [usuarios]):
-        asyncio.run(scraper.scrape_and_save(u))
+    lista   = usuarios if isinstance(usuarios, list) else [usuarios]
+
+    for usuario in lista:
+        logger.info(f"=== Iniciando scraping para @{usuario} ===")
+        scraper.scrape_and_save(usuario, max_videos=max_videos)
+        logger.info(f"=== Finalizado @{usuario} ===")
