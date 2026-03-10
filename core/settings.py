@@ -56,8 +56,6 @@ TEMPLATES = [
 IF_AZURE = os.path.exists('/home/site')
 
 if IF_AZURE:
-    # Olvidate de os.environ.get('HOME'), vamos directo al grano
-    # Creamos la carpeta data si no existe para que no chille
     if not os.path.exists('/home/data'):
         os.makedirs('/home/data', exist_ok=True)
     

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 from django_backend.scripts.script_ig import iniciar as iniciar_ig
 from django_backend.scripts.script_tk import iniciar as iniciar_tk
 from django_backend.scripts.script_x import iniciar as iniciar_x
+from django_backend.scripts.script_yb import iniciar_yt
 
 class ScraperViewSet(viewsets.ViewSet):
 
@@ -77,6 +78,8 @@ class ScraperViewSet(viewsets.ViewSet):
                 thread = threading.Thread(target=iniciar_x, args=(keys_search, keys_posts, targets))
             else:
                 return Response({'error': 'Faltan llaves de X (search o posts)'}, status=400)
+        elif platform == 'yt':
+            thread = threading.Thread(target=iniciar_yt, args=(targets,))
 
         if thread:
             thread.daemon = True

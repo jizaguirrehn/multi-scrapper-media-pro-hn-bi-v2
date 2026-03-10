@@ -7,6 +7,8 @@ class ScraperKey(models.Model):
         ('ig', 'Instagram'),
         ('tk', 'TikTok'),
         ('x', 'X/Twitter'),
+        ('yt', 'YouTube'),
+        ('fb', 'Facebook'),
     ]
     platform = models.CharField(max_length=2, choices=PLATFORM_CHOICES)
     key_value = models.TextField()  # Encrypt this in a real prod app
