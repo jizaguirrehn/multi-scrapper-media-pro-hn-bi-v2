@@ -22,6 +22,19 @@ class YouTubeScraperService:
     #  PARSERS                                                             #
     # ------------------------------------------------------------------ #
 
+    MESES_ES = {
+        "ene": 1, "feb": 2, "mar": 3, "abr": 4,
+        "may": 5, "jun": 6, "jul": 7, "ago": 8,
+        "sep": 9, "oct": 10, "nov": 11, "dic": 12
+    }
+
+    def __parsear_fecha_es(self, texto, field_name=""):
+        partes = texto.lower().replace(".", "").replace(" de ", " ").split()
+        dia = int(partes[0])
+        mes = self.MESES_ES[partes[1][:3]]
+        anio = int(partes[2])
+        return datetime(anio, mes, dia)
+
     def _parse_numeric_text(self, text, field_name=""):
         """Convierte strings como '1.2M', '50K' o '125,432' en enteros."""
         if not text:
@@ -86,11 +99,12 @@ class YouTubeScraperService:
                 pass
 
         # --- Likes y comentarios desde ytInitialData ---
-        likes_raw, comm_raw = "0", "0"
+        likes_raw, comm_raw, date_raw = "0", "0", "0"
         match_data = re.search(r'ytInitialData\s*=\s*({.+?});', resp.text)
         if match_data:
             try:
                 data_v = json.loads(match_data.group(1))
+                date_raw = data_v["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"][0]["videoPrimaryInfoRenderer"]["dateText"]["simpleText"]
                 panels  = data_v.get("engagementPanels", [])
 
                 # Comentarios: primer panel → contextualInfo
@@ -135,6 +149,7 @@ class YouTubeScraperService:
             "views":    self._parse_numeric_text(views_raw, "views"),
             "likes":    self._parse_numeric_text(likes_raw, "likes"),
             "comments": self._parse_numeric_text(comm_raw,  "comments"),
+            "date" : self.__parsear_fecha_es(date_raw, "date"),
         }
 
     # ------------------------------------------------------------------ #
@@ -161,10 +176,6 @@ class YouTubeScraperService:
             )
         except Exception as e:
             logger.error(f"Error al guardar en DB: {e}")
-
-    # ------------------------------------------------------------------ #
-    #  SCRAPING PRINCIPAL                                                  #
-    # ------------------------------------------------------------------ #
 
     def scrape_and_save(self, usuario: str, max_videos: int = 15):
         """
@@ -240,7 +251,7 @@ class YouTubeScraperService:
             self._guardar_en_db(
                 usuario      = usuario,
                 seguidores_raw = seguidores_raw,
-                fecha_dt     = fecha_dt,
+                fecha_dt     = metrics["date"],
                 views        = metrics["views"],
                 likes        = metrics["likes"],
                 comments     = metrics["comments"],
