@@ -2,6 +2,8 @@ from django.db.models import Q
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
+
+from django_backend.scripts.script_fb import iniciar_fb
 from .models import ScrapeResult, ScraperKey
 from .serializers import ScrapeResultSerializer, ScraperKeySerializer
 from django.db.models import F, ExpressionWrapper, FloatField
@@ -80,6 +82,10 @@ class ScraperViewSet(viewsets.ViewSet):
                 return Response({'error': 'Faltan llaves de X (search o posts)'}, status=400)
         elif platform == 'yt':
             thread = threading.Thread(target=iniciar_yt, args=(targets,))
+        elif platform == 'fb':
+            keys = list(ScraperKey.objects.filter(platform='fb', is_active=True).values_list('key_value', flat=True))
+            if keys:
+                thread = threading.Thread(target=iniciar_fb, args=(keys[0], targets))
 
         if thread:
             thread.daemon = True
