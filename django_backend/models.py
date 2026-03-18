@@ -11,10 +11,13 @@ class ScraperKey(models.Model):
         ('fb', 'Facebook'),
     ]
     platform = models.CharField(max_length=2, choices=PLATFORM_CHOICES)
-    key_value = models.TextField()  # Encrypt this in a real prod app
+    key_value = models.TextField()
     purpose = models.CharField(max_length=50, default='general')
     is_active = models.BooleanField(default=True)
     last_used = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ScraperKey'
 
 class ScrapeResult(models.Model):
     platform = models.CharField(max_length=10)
@@ -27,6 +30,8 @@ class ScrapeResult(models.Model):
     description = models.TextField(blank=True)
     raw_data = models.JSONField(null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    is_loto = models.BooleanField(default=False)
 
     class Meta:
+        db_table = 'ScrapeResult'
         ordering = ['-created_at']

@@ -106,6 +106,10 @@ class YouTubeScraperService:
                 data_v = json.loads(match_data.group(1))
                 date_raw = data_v["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"][0]["videoPrimaryInfoRenderer"]["dateText"]["simpleText"]
                 panels  = data_v.get("engagementPanels", [])
+                raw_desc = data_v["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"][1]["videoSecondaryInfoRenderer"]["attributedDescription"]["content"]
+
+                # Reemplazamos saltos de línea (\n o \r) por espacios, y luego quitamos espacios duplicados
+                descripcion_plana = " ".join(raw_desc.split())  
 
                 # Comentarios: primer panel → contextualInfo
                 try:
@@ -150,6 +154,7 @@ class YouTubeScraperService:
             "likes":    self._parse_numeric_text(likes_raw, "likes"),
             "comments": self._parse_numeric_text(comm_raw,  "comments"),
             "date" : self.__parsear_fecha_es(date_raw, "date"),
+            "description": descripcion_plana,
         }
 
     # ------------------------------------------------------------------ #
@@ -157,7 +162,7 @@ class YouTubeScraperService:
     # ------------------------------------------------------------------ #
 
     def _guardar_en_db(self, usuario, seguidores_raw, fecha_dt,
-                       views, likes, comments, title):
+                       views, likes, comments, title, description):
         try:
             seguidores = self._parse_numeric_text(seguidores_raw)
             ScrapeResult.objects.create(
@@ -168,7 +173,7 @@ class YouTubeScraperService:
                 likes       = likes,
                 comments    = comments,
                 views       = views,
-                description = title,
+                description = description,
             )
             logger.info(
                 f"DB ✔ [{usuario}] {title[:40]!r} | "
@@ -256,6 +261,7 @@ class YouTubeScraperService:
                 likes        = metrics["likes"],
                 comments     = metrics["comments"],
                 title        = metrics["title"],
+                description    = metrics["description"],
             )
 
 
