@@ -1,15 +1,32 @@
-from django.urls import path, include, re_path
-from django.views.generic import TemplateView
+from django.contrib import admin
+from django.urls import path, include
+from django.http import JsonResponse
 from rest_framework.routers import DefaultRouter
-from django_backend.views import ScraperViewSet
+from django_backend.views import ScraperViewSet, azure_login
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
+
+def api_root(request):
+    return JsonResponse({
+        "status": "online",
+        "message": "Backend Scraper API Operativa",
+        "endpoints": ["/api/scraper/"]
+    })
 
 router = DefaultRouter()
 router.register(r'scraper', ScraperViewSet, basename='scraper')
 
 urlpatterns = [
+    path('admin/', admin.site.urls),
+
     path('api/', include(router.urls)),
 
-    path('', TemplateView.as_view(template_name='index.html'), name='index'),
+    path('', api_root, name='index'),
 
-    re_path(r'^.*$', TemplateView.as_view(template_name='index.html')),
+    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/auth/azure-login/', azure_login, name='azure_login'), # Ruta para el login de React
+    path('', include(router.urls)),
 ]

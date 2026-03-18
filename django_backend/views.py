@@ -1,7 +1,13 @@
+import email
+from jose import jwt
+
 from django.db.models import Q
+from django.contrib.auth.models import User
 from rest_framework import viewsets, status
 from rest_framework.response import Response
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from django_backend.scripts.script_fb import iniciar_fb
 from .models import ScrapeResult, ScraperKey
@@ -50,6 +56,8 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['post'])
     def trigger_extraction(self, request):
+        if request.user.groups.filter(name='Colaborador').exists():
+            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         platform = request.data.get('platform')
         targets = request.data.get('targets', [])
         
@@ -122,43 +130,51 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'], url_path='user_history')
     def api_historico_usuario(self, request):
+        if request.user.groups.filter(name='Colaborador').exists():
+            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         try:
             criterio = request.GET.get('query', '').strip()
             
-            # Validación para evitar que el * rompa el Regex de SQL
-            if criterio == '*' or criterio == '' or criterio == '.*':
+            if criterio in ('*', '', '.*'):
                 posts = ScrapeResult.objects.all().order_by('-created_at')[:500]
             else:
                 posts = ScrapeResult.objects.filter(
                     Q(username__iregex=criterio)
                 ).order_by('-created_at')[:500]
 
-            # Usamos el Serializer para evitar errores de formato manual
             serializer = ScrapeResultSerializer(posts, many=True)
             return Response(serializer.data)
 
         except Exception as e:
             logger.error(f"Error en api_historico_usuario: {str(e)}")
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
+        
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
+        if not request.user.groups.filter(name='Directora').exists():
+            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         total_posts = ScrapeResult.objects.count()
         total_profiles = ScrapeResult.objects.values('username').distinct().count()
 
+        # Engagement: Añadimos .order_by() para evitar conflictos de ordenamiento
         queryset_engagement = ScrapeResult.objects.filter(followers__gt=0).annotate(
-        engagement_val=ExpressionWrapper(
+            engagement_val=ExpressionWrapper(
                 (F('likes') + F('comments')) * 100.0 / F('followers'),
                 output_field=FloatField()
             )
-        ).values_list('engagement_val', flat=True)
+        ).order_by().values_list('engagement_val', flat=True)
 
         engagement_list = list(queryset_engagement)
-        median_engagement = round(statistics.median(engagement_list), 2) if engagement_list else 0
+        median_engagement = statistics.median(engagement_list) if engagement_list else 0
 
-        dist = ScrapeResult.objects.values('platform').annotate(count=Count('id'))
+        # Distribución por plataforma: CORRECCIÓN CRUCIAL PARA SQL SERVER
+        dist = ScrapeResult.objects.values('platform').annotate(
+            count=Count('id')
+        ).order_by() # <-- Limpia el ORDER BY implícito que causaba el error
+        
         platform_distribution = {item['platform']: item['count'] for item in dist}
 
+        # Volumen semanal: CORRECCIÓN CRUCIAL PARA SQL SERVER
         hace_una_semana = timezone.now() - datetime.timedelta(days=7)
         dias_map = {1: 'Sun', 2: 'Mon', 3: 'Tue', 4: 'Wed', 5: 'Thu', 6: 'Fri', 7: 'Sat'}
         
@@ -167,11 +183,14 @@ class ScraperViewSet(viewsets.ViewSet):
             .annotate(day_num=ExtractWeekDay('created_at'))
             .values('day_num')
             .annotate(count=Count('id'))
+            .order_by() # <-- Evita que intente ordenar por 'created_at' fuera del GROUP BY
         )
         
         weekly_volume = {dias_map[i]: 0 for i in range(1, 8)}
         for item in volumen_raw:
-            weekly_volume[dias_map[item['day_num']]] = item['count']
+            # SQL Server a veces devuelve day_num como float o int según el driver
+            d_idx = int(item['day_num'])
+            weekly_volume[dias_map[d_idx]] = item['count']
 
         return Response({
             "total_extracted": total_posts,
@@ -180,3 +199,45 @@ class ScraperViewSet(viewsets.ViewSet):
             "platform_distribution": platform_distribution,
             "weekly_volume": weekly_volume
         })
+    
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def public_status(self, request):
+        return Response({"status": "Servidor Vivo", "version": "1.5.0"})
+    
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def azure_login(request):
+    azure_token = request.data.get('token')
+    
+    try:
+        payload = jwt.get_unverified_claims(azure_token)
+        email = payload.get('preferred_username') or payload.get('email')
+        name = payload.get('name', 'Usuario Loto')
+        
+        if not email:
+            return Response({'error': 'No se encontró email en el token'}, status=400)
+
+        username = email.split('@')[0]
+
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={
+                'username': username, 
+                'first_name': name
+            }
+        )
+
+        refresh = RefreshToken.for_user(user)
+
+        return Response({
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'is_new_user': created,
+            'user': {
+                'email': user.email,
+                'name': user.first_name
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error en azure_login: {str(e)}")
+        return Response({'error': 'Token inválido'}, status=400)
