@@ -23,6 +23,9 @@ jobs:
           pip install django gunicorn whitenoise
           pip install djangorestframework django-cors-headers
           pip install requests beautifulsoup4 python-dotenv
+          pip install mssql-django python-dotenv
+          pip install djangorestframework-simplejwt
+          pip install python-jose
           # Generamos el archivo que Azure usará para instalar todo allá
           pip freeze > requirements.txt
 
