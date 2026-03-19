@@ -31,6 +31,15 @@ class ScrapeResult(models.Model):
     raw_data = models.JSONField(null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_loto = models.BooleanField(default=False)
+    sentimiento_global = models.CharField(max_length=50, default='N/A')
+    alegria = models.FloatField(default=0.0)
+    confianza = models.FloatField(default=0.0)
+    miedo = models.FloatField(default=0.0)
+    sorpresa = models.FloatField(default=0.0)
+    tristeza = models.FloatField(default=0.0)
+    aversion = models.FloatField(default=0.0)
+    ira = models.FloatField(default=0.0)
+    anticipacion = models.FloatField(default=0.0)
 
     class Meta:
         db_table = 'ScrapeResult'
