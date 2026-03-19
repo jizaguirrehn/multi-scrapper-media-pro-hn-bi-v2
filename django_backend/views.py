@@ -207,23 +207,39 @@ class ScraperViewSet(viewsets.ViewSet):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def azure_login(request):
-    azure_token = request.data.get('token')
+    token = request.data.get('access_token')
+    
+    if not token:
+        return Response({"error": "No token provided"}, status=400)
     
     try:
-        payload = jwt.get_unverified_claims(azure_token)
-        email = payload.get('preferred_username') or payload.get('email')
-        name = payload.get('name', 'Usuario Loto')
+        # Decodificación relajada para diagnóstico
+        payload = jwt.decode(
+            token, 
+            None, 
+            options={
+                "verify_signature": False, 
+                "verify_aud": False, 
+                "verify_iss": False, 
+                "verify_at_hash": False
+            }
+        )
+        
+        email = payload.get('email') or payload.get('preferred_username')
+        # 2. Extraemos el nombre del payload para que no de error
+        full_name = payload.get('name', 'Usuario Loto')
         
         if not email:
-            return Response({'error': 'No se encontró email en el token'}, status=400)
+            return Response({"error": "No email in token"}, status=400)
 
         username = email.split('@')[0]
 
+        # 3. Usamos la variable full_name que acabamos de extraer
         user, created = User.objects.get_or_create(
             email=email,
             defaults={
                 'username': username, 
-                'first_name': name
+                'first_name': full_name
             }
         )
 
@@ -240,4 +256,5 @@ def azure_login(request):
         })
     except Exception as e:
         logger.error(f"Error en azure_login: {str(e)}")
-        return Response({'error': 'Token inválido'}, status=400)
+        # Es mejor devolver el error real en el mensaje durante pruebas
+        return Response({'error': 'Token inválido', 'details': str(e)}, status=400)
