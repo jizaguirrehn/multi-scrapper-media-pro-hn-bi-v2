@@ -25,7 +25,7 @@ jobs:
           pip install requests beautifulsoup4 python-dotenv
           pip install mssql-django python-dotenv
           pip install djangorestframework-simplejwt
-          pip install python-jose
+          pip install "python-jose[cryptography]"
           # Generamos el archivo que Azure usará para instalar todo allá
           pip freeze > requirements.txt
 
