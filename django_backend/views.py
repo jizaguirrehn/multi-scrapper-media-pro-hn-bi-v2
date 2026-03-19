@@ -207,7 +207,7 @@ class ScraperViewSet(viewsets.ViewSet):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def azure_login(request):
-    token = request.data.get('token')
+    token = request.data.get('access_token')
     
     if not token:
         return Response({"error": "No token provided"}, status=400)
