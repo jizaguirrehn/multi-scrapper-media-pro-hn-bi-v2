@@ -25,10 +25,13 @@ jobs:
           pip install requests beautifulsoup4 python-dotenv
           pip install mssql-django python-dotenv
           pip install djangorestframework-simplejwt
-          pip install "python-jose[cryptography]"
           pip install pandas
+          pip install "python-jose[cryptography]"
           # Generamos el archivo que Azure usará para instalar todo allá
           pip freeze > requirements.txt
+
+          echo "Contenido del requirements"
+          cat requirements.txt | grep pandas
 
       - name: Zip artifact for deployment
         # Incluimos la carpeta .dist y el nuevo requirements.txt
