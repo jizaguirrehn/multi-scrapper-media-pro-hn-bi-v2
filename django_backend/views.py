@@ -33,6 +33,8 @@ class ScraperViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'])
     def bulk_update(self, request):
+        if not request.user.groups.filter(name__in=['Admin_Scraper']).exists():
+            return Response({"error": "No tienes permiso para actualizar las llaves"}, status=403)
         data = request.data
                 
         try:
@@ -56,7 +58,7 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['post'])
     def trigger_extraction(self, request):
-        if request.user.groups.filter(name='Colaborador').exists():
+        if request.user.groups.filter(name__in=['Colaborador']).exists():
             return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         platform = request.data.get('platform')
         targets = request.data.get('targets', [])
@@ -130,7 +132,7 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'], url_path='user_history')
     def api_historico_usuario(self, request):
-        if request.user.groups.filter(name='Colaborador').exists():
+        if request.user.groups.filter(name_in=['Colaborador']).exists():
             return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         try:
             criterio = request.GET.get('query', '').strip()
@@ -151,7 +153,7 @@ class ScraperViewSet(viewsets.ViewSet):
         
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
-        if not request.user.groups.filter(name='Directora').exists():
+        if not request.user.groups.filter(name__in=["Directora", "Gerente"]).exists():
             return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         total_posts = ScrapeResult.objects.count()
         total_profiles = ScrapeResult.objects.values('username').distinct().count()
