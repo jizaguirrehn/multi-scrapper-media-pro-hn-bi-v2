@@ -132,7 +132,7 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'], url_path='user_history')
     def api_historico_usuario(self, request):
-        if request.user.groups.filter(name_in=['Colaborador']).exists():
+        if request.user.groups.filter(name__in=['Colaborador']).exists():
             return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         try:
             criterio = request.GET.get('query', '').strip()
@@ -153,12 +153,11 @@ class ScraperViewSet(viewsets.ViewSet):
         
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
-        if not request.user.groups.filter(name__in=["Directora", "Gerente"]).exists():
+        if not request.user.groups.filter(name__in=["Directora", "Gerente", "Admin_Scraper"]).exists():
             return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         total_posts = ScrapeResult.objects.count()
         total_profiles = ScrapeResult.objects.values('username').distinct().count()
 
-        # Engagement: Añadimos .order_by() para evitar conflictos de ordenamiento
         queryset_engagement = ScrapeResult.objects.filter(followers__gt=0).annotate(
             engagement_val=ExpressionWrapper(
                 (F('likes') + F('comments')) * 100.0 / F('followers'),
@@ -169,14 +168,12 @@ class ScraperViewSet(viewsets.ViewSet):
         engagement_list = list(queryset_engagement)
         median_engagement = statistics.median(engagement_list) if engagement_list else 0
 
-        # Distribución por plataforma: CORRECCIÓN CRUCIAL PARA SQL SERVER
         dist = ScrapeResult.objects.values('platform').annotate(
             count=Count('id')
-        ).order_by() # <-- Limpia el ORDER BY implícito que causaba el error
+        ).order_by() 
         
         platform_distribution = {item['platform']: item['count'] for item in dist}
 
-        # Volumen semanal: CORRECCIÓN CRUCIAL PARA SQL SERVER
         hace_una_semana = timezone.now() - datetime.timedelta(days=7)
         dias_map = {1: 'Sun', 2: 'Mon', 3: 'Tue', 4: 'Wed', 5: 'Thu', 6: 'Fri', 7: 'Sat'}
         
@@ -185,12 +182,11 @@ class ScraperViewSet(viewsets.ViewSet):
             .annotate(day_num=ExtractWeekDay('created_at'))
             .values('day_num')
             .annotate(count=Count('id'))
-            .order_by() # <-- Evita que intente ordenar por 'created_at' fuera del GROUP BY
+            .order_by()
         )
         
         weekly_volume = {dias_map[i]: 0 for i in range(1, 8)}
         for item in volumen_raw:
-            # SQL Server a veces devuelve day_num como float o int según el driver
             d_idx = int(item['day_num'])
             weekly_volume[dias_map[d_idx]] = item['count']
 
@@ -204,7 +200,7 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def public_status(self, request):
-        return Response({"status": "Servidor Vivo", "version": "1.5.0"})
+        return Response({"status": "Servidor Vivo", "version": "1.6.0"})
     
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -215,7 +211,6 @@ def azure_login(request):
         return Response({"error": "No token provided"}, status=400)
     
     try:
-        # Decodificación relajada para diagnóstico
         payload = jwt.decode(
             token, 
             None, 
@@ -228,7 +223,6 @@ def azure_login(request):
         )
         
         email = payload.get('email') or payload.get('preferred_username')
-        # 2. Extraemos el nombre del payload para que no de error
         full_name = payload.get('name', 'Usuario Loto')
         
         if not email:
@@ -236,7 +230,6 @@ def azure_login(request):
 
         username = email.split('@')[0]
 
-        # 3. Usamos la variable full_name que acabamos de extraer
         user, created = User.objects.get_or_create(
             email=email,
             defaults={
@@ -258,5 +251,4 @@ def azure_login(request):
         })
     except Exception as e:
         logger.error(f"Error en azure_login: {str(e)}")
-        # Es mejor devolver el error real en el mensaje durante pruebas
         return Response({'error': 'Token inválido', 'details': str(e)}, status=400)

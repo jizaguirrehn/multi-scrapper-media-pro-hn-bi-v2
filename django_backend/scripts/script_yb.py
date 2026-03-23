@@ -33,7 +33,7 @@ def obtener_datos_completos(nombre_canal):
     stats_canal = youtube.channels().list(part="statistics", id=channel_id).execute()
     total_subs = int(stats_canal['items'][0]['statistics'].get('subscriberCount', 0))
 
-    search_videos = youtube.search().list(channelId=channel_id, part="id,snippet", order="date", type="video", maxResults=1).execute()
+    search_videos = youtube.search().list(channelId=channel_id, part="id,snippet", order="date", type="video", maxResults=25).execute()
     ids_videos = [item['id']['videoId'] for item in search_videos['items']]
 
     stats_videos = youtube.videos().list(part="statistics,snippet", id=",".join(ids_videos)).execute()
