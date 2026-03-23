@@ -26,6 +26,7 @@ jobs:
           pip install mssql-django python-dotenv
           pip install djangorestframework-simplejwt
           pip install "python-jose[cryptography]"
+          pip install pandas
           # Generamos el archivo que Azure usará para instalar todo allá
           pip freeze > requirements.txt
 
