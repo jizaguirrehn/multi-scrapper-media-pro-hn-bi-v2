@@ -153,7 +153,7 @@ class ScraperViewSet(viewsets.ViewSet):
         
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
-        if not request.user.groups.filter(name__in=["Directora", "Gerente", "Admin_Scraper"]).exists():
+        if not request.user.groups.filter(name__in=["Director", "Gerente", "Admin_Scraper"]).exists():
             return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         total_posts = ScrapeResult.objects.count()
         total_profiles = ScrapeResult.objects.values('username').distinct().count()
@@ -200,7 +200,60 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def public_status(self, request):
-        return Response({"status": "Servidor Vivo", "version": "1.6.0"})
+        return Response({"status": "Servidor Vivo", "version": "1.6.1"})
+    
+    @action(detail=False, methods=['post'], url_path='assign_role')
+    def assign_role(self, request):
+        """
+        Endpoint para asignar grupos a un usuario.
+        Cuerpo esperado: { "username": "nombre", "group_name": "Gerente", "clear_existing": true }
+        """
+        if not request.user.groups.filter(name='Admin_Scraper').exists() and not request.user.is_superuser:
+            return Response({"error": "No tienes permiso para gestionar roles"}, status=403)
+
+        username = request.data.get('username')
+        group_name = request.data.get('group_name')
+        clear_existing = request.data.get('clear_existing', False) # Opcional
+
+        if not username or not group_name:
+            return Response({"error": "Faltan parámetros: username y group_name"}, status=400)
+
+        try:
+            from django.contrib.auth.models import Group
+            user = User.objects.get(username=username)
+            group = Group.objects.get(name=group_name)
+
+            if clear_existing:
+                user.groups.clear()
+                logger.info(f"Grupos limpiados para el usuario {username}")
+
+            user.groups.add(group)
+            
+            if group_name in ['Admin_Scraper', 'Director']:
+                user.is_staff = True
+                user.save()
+
+            return Response({
+                "status": "success",
+                "message": f"Usuario {username} asignado al grupo {group_name}"
+            }, status=status.HTTP_200_OK)
+
+        except User.DoesNotExist:
+            return Response({"error": "El usuario no existe"}, status=404)
+        except Group.DoesNotExist:
+            return Response({"error": "El grupo no existe. Verifica que post_migrate haya corrido."}, status=404)
+        except Exception as e:
+            logger.error(f"Error en assign_role: {str(e)}")
+            return Response({"error": str(e)}, status=500)
+    
+    @action(detail=False, methods=['get'], url_path='list_users')
+    def list_users(self, request):
+        """Devuelve la lista de usuarios para el selector del frontend."""
+        if not request.user.is_staff and not request.user.groups.filter(name='Admin_Scraper').exists():
+            return Response({"error": "No tienes permiso"}, status=403)
+            
+        users = User.objects.all().values('id', 'username', 'first_name', 'email')
+        return Response(list(users), status=200)
     
 @api_view(['POST'])
 @permission_classes([AllowAny])
