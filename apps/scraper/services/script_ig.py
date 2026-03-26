@@ -3,7 +3,7 @@ import csv
 import os
 from datetime import datetime
 
-from django_backend.models import ScrapeResult
+from apps.scraper.models import ScrapeResult
 from django.utils.timezone import make_aware
 
 HOY = datetime.now().strftime("%Y_%m_%d")

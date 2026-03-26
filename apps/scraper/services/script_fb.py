@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 
-from django_backend.models import ScrapeResult
+from apps.scraper.models import ScrapeResult
 from django.utils.timezone import make_aware 
 
 ARCHIVO_IDS = "usuarios_fb_registrados.json"

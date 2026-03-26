@@ -6,9 +6,9 @@ from .sentiments.analizador import get_data
 from dotenv import load_dotenv
 
 import django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django_backend.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'scraper.settings')
 django.setup()
-from django_backend.models import ScrapeResult
+from apps.scraper.models import ScrapeResult
 
 load_dotenv()
 

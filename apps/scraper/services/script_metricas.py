@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 django.setup()
 
-from django_backend.models import ScrapeResult
+from apps.scraper.models import ScrapeResult
 
 def mostrar_metricas():
     print("="*40)

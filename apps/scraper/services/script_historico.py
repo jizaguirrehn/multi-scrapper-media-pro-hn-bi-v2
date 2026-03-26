@@ -1,4 +1,4 @@
-from django_backend.models import ScrapeResult
+from apps.scraper.models import ScrapeResult
 from django.db.models import Q
 
 def mostrar_historico(criterio):

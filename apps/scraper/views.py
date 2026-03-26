@@ -10,7 +10,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from django_backend.scripts.script_fb import iniciar_fb
+from apps.scraper.services.script_fb import iniciar_fb
 from .models import ScrapeResult, ScraperKey, ExtractionRequestLog
 from .serializers import (
     ScrapeResultSerializer,
@@ -30,10 +30,10 @@ import statistics
 
 logger = logging.getLogger(__name__)
 
-from django_backend.scripts.script_ig import iniciar as iniciar_ig
-from django_backend.scripts.script_tk import iniciar as iniciar_tk
-from django_backend.scripts.script_x import iniciar as iniciar_x
-from django_backend.scripts.script_yb import iniciar_yt
+from apps.scraper.services.script_ig import iniciar as iniciar_ig
+from apps.scraper.services.script_tk import iniciar as iniciar_tk
+from apps.scraper.services.script_x import iniciar as iniciar_x
+from apps.scraper.services.script_yb import iniciar_yt
 
 
 def _get_client_ip(request):

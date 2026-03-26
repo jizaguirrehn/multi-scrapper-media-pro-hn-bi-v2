@@ -3,7 +3,7 @@ import csv
 import json
 import os
 from datetime import datetime
-from django_backend.models import ScrapeResult
+from apps.scraper.models import ScrapeResult
 from django.utils.timezone import make_aware
 
 def guardar_en_db(target, seguidores, fecha_obj, likes, replies, retweets, vistas, desc):
