@@ -2,6 +2,7 @@ import email
 from jose import jwt
 
 from django.db.models import Q
+from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework import viewsets, status
 from rest_framework.response import Response
@@ -10,8 +11,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from django_backend.scripts.script_fb import iniciar_fb
-from .models import ScrapeResult, ScraperKey
-from .serializers import ScrapeResultSerializer, ScraperKeySerializer
+from .models import ScrapeResult, ScraperKey, ExtractionRequestLog
+from .serializers import (
+    ScrapeResultSerializer,
+    ScraperKeySerializer,
+    RegisterSerializer,
+    LoginSerializer,
+)
 from django.db.models import F, ExpressionWrapper, FloatField
 from django.db.models import Count, Avg
 from django.db.models.functions import ExtractWeekDay
@@ -28,6 +34,13 @@ from django_backend.scripts.script_ig import iniciar as iniciar_ig
 from django_backend.scripts.script_tk import iniciar as iniciar_tk
 from django_backend.scripts.script_x import iniciar as iniciar_x
 from django_backend.scripts.script_yb import iniciar_yt
+
+
+def _get_client_ip(request):
+    forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if forwarded_for:
+        return forwarded_for.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR', '')
 
 class ScraperViewSet(viewsets.ViewSet):
 
@@ -58,19 +71,32 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['post'])
     def trigger_extraction(self, request):
-        if request.user.groups.filter(name__in=['Colaborador']).exists():
-            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         platform = request.data.get('platform')
         targets = request.data.get('targets', [])
+        request_log = ExtractionRequestLog.objects.create(
+            user=request.user if request.user.is_authenticated else None,
+            platform=(platform or '').lower(),
+            targets=targets if isinstance(targets, list) else [targets],
+            ip_address=_get_client_ip(request),
+            status='PENDING',
+        )
+
+        if request.user.groups.filter(name__in=['Colaborador']).exists():
+            request_log.status = 'DENIED'
+            request_log.detail = 'No tiene permiso para iniciar extracciones'
+            request_log.save(update_fields=['status', 'detail'])
+            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
         
         start_time = timezone.now().isoformat()
 
         if not platform or not targets:
+            request_log.status = 'INVALID'
+            request_log.detail = 'Faltan parametros platform o targets'
+            request_log.save(update_fields=['status', 'detail'])
             return Response({'error': 'Faltan parámetros (platform o targets)'}, 
                             status=status.HTTP_400_BAD_REQUEST)
 
         thread = None
-        target_function = None
 
         if platform == 'ig':
             keys = list(ScraperKey.objects.filter(platform='ig', is_active=True).values_list('key_value', flat=True))
@@ -89,6 +115,9 @@ class ScraperViewSet(viewsets.ViewSet):
             if keys_search and keys_posts:
                 thread = threading.Thread(target=iniciar_x, args=(keys_search, keys_posts, targets))
             else:
+                request_log.status = 'ERROR'
+                request_log.detail = 'Faltan llaves de X (search o posts)'
+                request_log.save(update_fields=['status', 'detail'])
                 return Response({'error': 'Faltan llaves de X (search o posts)'}, status=400)
         elif platform == 'yt':
             thread = threading.Thread(target=iniciar_yt, args=(targets,))
@@ -100,12 +129,18 @@ class ScraperViewSet(viewsets.ViewSet):
         if thread:
             thread.daemon = True
             thread.start()
+            request_log.status = 'STARTED'
+            request_log.detail = 'Extraccion iniciada'
+            request_log.save(update_fields=['status', 'detail'])
             return Response({
                 'status': 'Extracción iniciada', 
                 'platform': platform,
                 'started_at': start_time
             }, status=status.HTTP_202_ACCEPTED)
         
+        request_log.status = 'ERROR'
+        request_log.detail = 'No se pudo iniciar el hilo. Revisa las llaves.'
+        request_log.save(update_fields=['status', 'detail'])
         return Response({'error': 'No se pudo iniciar el hilo. Revisa las llaves.'}, status=400)
 
     
@@ -305,3 +340,69 @@ def azure_login(request):
     except Exception as e:
         logger.error(f"Error en azure_login: {str(e)}")
         return Response({'error': 'Token inválido', 'details': str(e)}, status=400)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def register_user(request):
+    serializer = RegisterSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    validated = serializer.validated_data
+    user = User(
+        username=validated['username'],
+        email=validated['email'],
+        first_name=validated.get('first_name', ''),
+        last_name=validated.get('last_name', ''),
+    )
+    user.set_password(validated['password'])
+    user.save()
+
+    refresh = RefreshToken.for_user(user)
+
+    return Response({
+        'message': 'Usuario registrado correctamente',
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'name': user.first_name,
+        },
+        'registros_auth_user': User.objects.count(),
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login_user(request):
+    serializer = LoginSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+
+    identifier = serializer.validated_data['identifier'].strip()
+    password = serializer.validated_data['password']
+
+    target_user = User.objects.filter(
+        Q(email__iexact=identifier) | Q(username__iexact=identifier)
+    ).first()
+
+    if not target_user:
+        return Response({'error': 'Usuario o correo no encontrado'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    user = authenticate(request, username=target_user.username, password=password)
+    if not user:
+        return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    refresh = RefreshToken.for_user(user)
+    return Response({
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'name': user.first_name,
+        },
+        'registros_auth_user': User.objects.count(),
+    }, status=status.HTTP_200_OK)

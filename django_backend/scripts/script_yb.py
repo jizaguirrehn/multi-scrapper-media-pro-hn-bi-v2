@@ -14,9 +14,10 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.WARNING)
 
 API_KEY = os.environ.get("KEY")
-youtube = build('youtube', 'v3', developerKey=API_KEY)
+youtube = build('youtube', 'v3', developerKey=API_KEY, cache_discovery=False)
 
 def obtener_datos_completos(nombre_canal):
     ai_service = get_data()
