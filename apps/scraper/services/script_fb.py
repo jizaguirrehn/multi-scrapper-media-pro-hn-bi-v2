@@ -2,15 +2,134 @@ import requests
 import csv
 import json
 import os
+import re
+import pandas as pd
 from datetime import datetime
 
 from apps.scraper.models import ScrapeResult
-from django.utils.timezone import make_aware 
+from django.utils.timezone import make_aware
+from apps.scraper.services.sentiments.analizador import get_data
 
 ARCHIVO_IDS = "usuarios_fb_registrados.json"
 HOY = datetime.now().strftime("%Y_%m_%d")
 
-def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc):
+
+def _extraer_texto_comentario(comment):
+    if not isinstance(comment, dict):
+        return ""
+    return (
+        comment.get('text')
+        or comment.get('comment_text')
+        or comment.get('message')
+        or comment.get('body')
+        or ""
+    ).strip()
+
+
+def _extraer_post_id_desde_url(post_url):
+    """Extrae post_id solo si la URL cumple el patrón /posts/<post_id>."""
+    if not post_url:
+        return None
+
+    match = re.search(r'/posts/([^/?#]+)', str(post_url))
+    if not match:
+        return None
+
+    post_id = match.group(1).strip()
+    return post_id or None
+
+
+def _obtener_comentarios_post(post_url, headers):
+    """Llama al endpoint /post/comments?post_id=... cuando la URL es de tipo /posts/<id>."""
+    if not post_url:
+        return []
+
+    post_id = _extraer_post_id_desde_url(post_url)
+    if not post_id:
+        print(f"  Post {post_url}: URL no compatible para comentarios (esperado /posts/<id>)")
+        return []
+
+    try:
+        res = requests.get(
+            "https://facebook-scraper3.p.rapidapi.com/post/comments",
+            headers=headers,
+            params={"post_id": post_id},
+            timeout=15,
+        )
+        if res.status_code != 200:
+            return []
+
+        payload = res.json()
+
+        if isinstance(payload, list):
+            comments = payload
+        elif isinstance(payload, dict):
+            comments = payload.get('results', [])
+
+            if isinstance(comments, dict):
+                comments = comments.get('items', []) or comments.get('results', []) or []
+
+            if not isinstance(comments, list):
+                comments = []
+        else:
+            comments = []
+
+        textos = []
+        for c in comments:
+            txt = _extraer_texto_comentario(c)
+            if txt:
+                textos.append(txt)
+
+        return textos
+    except Exception as e:
+        print(f"Error obteniendo comentarios Facebook ({post_url}): {e}")
+        return []
+
+
+def _analizar_sentimiento(textos):
+    pesos = {
+        'alegria': 0.0,
+        'confianza': 0.0,
+        'miedo': 0.0,
+        'sorpresa': 0.0,
+        'tristeza': 0.0,
+        'aversion': 0.0,
+        'ira': 0.0,
+        'anticipacion': 0.0,
+    }
+    sentimiento_global = 'N/A'
+
+    if not textos:
+        return pesos, sentimiento_global
+
+    try:
+        ai_service = get_data()
+        df_textos = pd.DataFrame(textos, columns=['text'])
+        resultado = ai_service.main(df_textos)
+
+        if resultado and 'predictions' in resultado:
+            lista_emociones = [p['detalles_petalos'][0] for p in resultado['predictions']]
+            df_preds = pd.DataFrame(lista_emociones)
+            df_numeric = df_preds.apply(pd.to_numeric, errors='coerce')
+            sumas = df_numeric.sum()
+
+            pesos['alegria'] = float(sumas.get('Alegría', 0.0))
+            pesos['confianza'] = float(sumas.get('Confianza', 0.0))
+            pesos['miedo'] = float(sumas.get('Miedo', 0.0))
+            pesos['sorpresa'] = float(sumas.get('Sorpresa', 0.0))
+            pesos['tristeza'] = float(sumas.get('Tristeza', 0.0))
+            pesos['aversion'] = float(sumas.get('Aversión', 0.0))
+            pesos['ira'] = float(sumas.get('Ira', 0.0))
+            pesos['anticipacion'] = float(sumas.get('Anticipación', 0.0))
+
+            sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
+    except Exception as e:
+        print(f"Error en análisis de sentimiento (Facebook): {e}")
+
+    return pesos, sentimiento_global
+
+
+def guardar_en_db(target, seguidores, fecha_str, likes, comentarios, vistas, desc, pesos=None, sentimiento_global='N/A'):
     try:
         fecha_dt = None
         if fecha_str and fecha_str != "N/A":
@@ -20,6 +139,7 @@ def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc
             except Exception as e_fecha:
                 print(f"Error parseando fecha {fecha_str}: {e_fecha}")
 
+        p = pesos or {}
         ScrapeResult.objects.create(
             platform='fb',
             username=target,
@@ -28,7 +148,16 @@ def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc
             likes=likes,
             comments=comentarios,
             views=vistas,
-            description=desc
+            description=desc,
+            sentimiento_global=sentimiento_global,
+            alegria=p.get('alegria', 0.0),
+            confianza=p.get('confianza', 0.0),
+            miedo=p.get('miedo', 0.0),
+            sorpresa=p.get('sorpresa', 0.0),
+            tristeza=p.get('tristeza', 0.0),
+            aversion=p.get('aversion', 0.0),
+            ira=p.get('ira', 0.0),
+            anticipacion=p.get('anticipacion', 0.0),
         )
     except Exception as e:
         print(f"Error crítico al guardar en DB (Facebook): {e}")
@@ -43,94 +172,131 @@ def guardar_cache_ids(cache):
     with open(ARCHIVO_IDS, 'w') as f:
         json.dump(cache, f, indent=4)
 
-def analizar_facebook_optimizado(api_key, lista_targets):
-    cache_uids = cargar_cache_ids()
-    nombre_csv = f"results/datos_fb_{HOY}.csv"
 
-    if not os.path.exists('results'): os.makedirs('results')
-    
+def _asegurar_csv(nombre_csv):
+    if not os.path.exists('results'):
+        os.makedirs('results')
+
     if not os.path.exists(nombre_csv):
         with open(nombre_csv, mode='w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
             writer.writerow(['USUARIO', 'SEGUIDORES', 'FECHA_POST', 'LIKES', 'COMENTARIOS', 'VISTAS', 'DESCRIPCION'])
 
+
+def _obtener_info_perfil_fb(target, headers, cache_uids):
+    info_perfil = cache_uids.get(target)
+    if info_perfil:
+        return info_perfil
+
+    print(f"Buscando ID para @{target}...")
+    querystring = {"url": f"https://www.facebook.com/{target}"}
+    try:
+        res = requests.get(
+            "https://facebook-scraper3.p.rapidapi.com/page/details",
+            headers=headers,
+            params=querystring,
+            timeout=10,
+        )
+        if res.status_code != 200:
+            print(f"Error obteniendo perfil: {res.status_code}")
+            return None
+
+        user_info = res.json().get("results", {})
+        info_perfil = {
+            "pageId": user_info.get('page_id'),
+            "followers": user_info.get('followers', 0),
+        }
+        cache_uids[target] = info_perfil
+        guardar_cache_ids(cache_uids)
+        return info_perfil
+    except Exception as e:
+        print(f"Error de conexión perfil: {e}")
+        return None
+
+
+def _procesar_post_fb(writer, item, target, seguidores, headers):
+    likes = item.get('reactions_count', 0)
+    coments = item.get('comments_count', 0)
+    vistas = item.get('reshare_count', 0)
+    ts = item.get('timestamp')
+    fecha_txt = datetime.fromtimestamp(int(ts)).strftime('%d/%m/%Y %H:%M:%S') if ts else "N/A"
+    desc = item.get('message_rich', '').replace('\n', ' ')
+    post_url = item.get('url')
+
+    textos = _obtener_comentarios_post(post_url, headers)
+    pesos, sentimiento_global = _analizar_sentimiento(textos)
+    print(f"  Post {post_url}: comentarios={len(textos)} sentimiento={sentimiento_global}")
+
+    writer.writerow([target, seguidores, fecha_txt, likes, coments, vistas, desc])
+    guardar_en_db(
+        target,
+        seguidores,
+        fecha_txt,
+        likes,
+        coments,
+        vistas,
+        desc,
+        pesos=pesos,
+        sentimiento_global=sentimiento_global,
+    )
+
+
+def _procesar_posts_fb(target, page_id, seguidores, headers, nombre_csv):
+    cursor = None
+    for iteration in range(1, 8):
+        params = {"page_id": page_id}
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            res_p = requests.get(
+                "https://facebook-scraper3.p.rapidapi.com/page/posts",
+                headers=headers,
+                params=params,
+                timeout=15,
+            )
+            if res_p.status_code != 200:
+                print(f"  Error en nivel {iteration}: {res_p.status_code}")
+                break
+
+            data = res_p.json()
+            items = data.get('results', [])
+            cursor = data.get('cursor')
+
+            if items:
+                with open(nombre_csv, mode='a', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    for item in items:
+                        _procesar_post_fb(writer, item, target, seguidores, headers)
+
+            if not cursor:
+                print("  No hay más posts disponibles.")
+                break
+        except Exception as e:
+            print(f"  Error de conexión en nivel {iteration}: {e}")
+            break
+
+def analizar_facebook_optimizado(api_key, lista_targets):
+    cache_uids = cargar_cache_ids()
+    nombre_csv = f"results/datos_fb_{HOY}.csv"
+    _asegurar_csv(nombre_csv)
+
     # Headers globales ya que solo usamos una key
     headers = {
         "x-rapidapi-key": api_key, 
-        "x-rapidapi-host": "facebook-scraper3.p.rapidapi.com"
+        "x-rapidapi-host": "facebook-scraper3.p.rapidapi.com",
+        "Content-Type": "application/json",
     }
 
     for target in lista_targets:
-        info_perfil = cache_uids.get(target)
-        
-        # 1. Obtener ID del usuario si no está en caché
+        info_perfil = _obtener_info_perfil_fb(target, headers, cache_uids)
         if not info_perfil:
-            print(f"Buscando ID para @{target}...")
-            querystring = {"url": f"https://www.facebook.com/{target}"}
-            try:
-                res = requests.get("https://facebook-scraper3.p.rapidapi.com/page/details", 
-                                   headers=headers, params=querystring, timeout=10)
-                if res.status_code == 200:
-                    user_info = res.json()
-                    user_info = user_info.get("results", {})
-                    info_perfil = {
-                        "pageId": user_info.get('page_id'),
-                        "followers": user_info.get('followers', 0)
-                    }
-                    cache_uids[target] = info_perfil
-                    guardar_cache_ids(cache_uids)
-                else:
-                    print(f"Error obteniendo perfil: {res.status_code}")
-                    continue
-            except Exception as e:
-                print(f"Error de conexión perfil: {e}")
-                continue
+            continue
 
-        # 2. Obtener Posts con Cursor (7 iteraciones)
-        if info_perfil:
-            page_id = info_perfil.get("pageId")
-            seguidores = info_perfil.get("followers")
-            cursor = None
-            
-            
-            for iteration in range(1, 8):
-                params = {"page_id": page_id}
-                if cursor: params["cursor"] = cursor
-
-                try:
-                    res_p = requests.get("https://facebook-scraper3.p.rapidapi.com/page/posts", 
-                                        headers=headers, params=params, timeout=15)
-                    
-                    if res_p.status_code == 200:
-                        data = res_p.json()
-                        items = data.get('results', [])
-                        cursor = data.get('cursor')
-                        
-                        if items:
-                            with open(nombre_csv, mode='a', newline='', encoding='utf-8-sig') as f:
-                                writer = csv.writer(f)
-                                for item in items:
-                                    likes = item.get('reactions_count', 0)
-                                    coments = item.get('comments_count', 0)
-                                    vistas = item.get('reshare_count', 0)
-                                    ts = item.get('timestamp')
-                                    fecha_txt = datetime.fromtimestamp(int(ts)).strftime('%d/%m/%Y %H:%M:%S') if ts else "N/A"
-                                    desc = item.get('message_rich', '').replace('\n', ' ')
-                                    
-                                    writer.writerow([target, seguidores, fecha_txt, likes, coments, vistas, desc])
-                                    guardar_en_db(target, seguidores, fecha_txt, likes, coments, vistas, desc)
-                        
-                        
-                        if not cursor:
-                            print("  No hay más posts disponibles.")
-                            break
-                    else:
-                        print(f"  Error en nivel {iteration}: {res_p.status_code}")
-                        break # Si la key falla (429), detenemos el bucle
-                except Exception as e:
-                    print(f"  Error de conexión en nivel {iteration}: {e}")
-                    break
+        page_id = info_perfil.get("pageId")
+        seguidores = info_perfil.get("followers")
+        _procesar_posts_fb(target, page_id, seguidores, headers, nombre_csv)
 
 def iniciar_fb(key, lista_perfiles):
-    print(f"\n--- INICIANDO MÓDULO FACEBOOK (SINGLE KEY) ---")
+    print("\n--- INICIANDO MÓDULO FACEBOOK (SINGLE KEY) ---")
     analizar_facebook_optimizado(key, lista_perfiles)

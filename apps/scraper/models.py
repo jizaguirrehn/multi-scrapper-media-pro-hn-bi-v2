@@ -1,8 +1,22 @@
 
+import os
+import logging
+from cryptography.fernet import Fernet, InvalidToken
 from django.db import models
 from django.contrib.auth.models import User
 
+logger = logging.getLogger(__name__)
+
+
+def _get_keys_fernet():
+    key = os.getenv('SCRAPER_KEYS_MASTER_KEY', '')
+    if not key:
+        raise ValueError('SCRAPER_KEYS_MASTER_KEY is required to encrypt/decrypt scraper keys')
+    return Fernet(key.encode())
+
 class ScraperKey(models.Model):
+    ENCRYPTED_PREFIX = 'enc::'
+
     PLATFORM_CHOICES = [
         ('ig', 'Instagram'),
         ('tk', 'TikTok'),
@@ -18,6 +32,55 @@ class ScraperKey(models.Model):
 
     class Meta:
         db_table = 'ScraperKey'
+
+    @classmethod
+    def _is_encrypted(cls, value):
+        return isinstance(value, str) and value.startswith(cls.ENCRYPTED_PREFIX)
+
+    @classmethod
+    def _encrypt_value(cls, raw_value):
+        if not raw_value:
+            return raw_value
+        if cls._is_encrypted(raw_value):
+            return raw_value
+        token = _get_keys_fernet().encrypt(str(raw_value).encode()).decode()
+        return f'{cls.ENCRYPTED_PREFIX}{token}'
+
+    @classmethod
+    def _decrypt_value(cls, stored_value):
+        if not stored_value:
+            return stored_value
+        if not cls._is_encrypted(stored_value):
+            # Backward compatibility: valores antiguos en texto plano.
+            return stored_value
+
+        token = stored_value[len(cls.ENCRYPTED_PREFIX):]
+        try:
+            return _get_keys_fernet().decrypt(token.encode()).decode()
+        except InvalidToken as e:
+            raise ValueError('Unable to decrypt scraper key: invalid token or master key') from e
+
+    def get_decrypted_key(self):
+        return self._decrypt_value(self.key_value)
+
+    @classmethod
+    def get_active_keys(cls, platform, purpose=None):
+        query = cls.objects.filter(platform=platform, is_active=True)
+        if purpose is not None:
+            query = query.filter(purpose=purpose)
+
+        keys = []
+        for row in query:
+            try:
+                keys.append(row.get_decrypted_key())
+            except Exception as e:
+                logger.error('Error decrypting key id=%s platform=%s: %s', row.id, row.platform, e)
+        return [k for k in keys if k]
+
+    def save(self, *args, **kwargs):
+        if self.key_value:
+            self.key_value = self._encrypt_value(self.key_value)
+        super().save(*args, **kwargs)
 
 class ScrapeResult(models.Model):
     platform = models.CharField(max_length=10)

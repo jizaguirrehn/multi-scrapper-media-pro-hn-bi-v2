@@ -55,22 +55,22 @@ def _update_request_log(request_log, status_value, detail):
 
 def _build_extraction_thread(platform, targets):
     if platform == 'ig':
-        keys = list(ScraperKey.objects.filter(platform='ig', is_active=True).values_list('key_value', flat=True))
+        keys = ScraperKey.get_active_keys(platform='ig')
         if keys:
             return threading.Thread(target=iniciar_ig, args=(keys, targets)), None
         return None, None
 
     if platform == 'tk':
-        keys_search = list(ScraperKey.objects.filter(platform='tk', purpose='search', is_active=True).values_list('key_value', flat=True))
-        keys_posts = list(ScraperKey.objects.filter(platform='tk', purpose='posts', is_active=True).values_list('key_value', flat=True))
+        keys_search = ScraperKey.get_active_keys(platform='tk', purpose='search')
+        keys_posts = ScraperKey.get_active_keys(platform='tk', purpose='posts')
         if keys_search and keys_posts:
             logger.info("TikTok keys loaded. search=%s posts=%s", len(keys_search), len(keys_posts))
             return threading.Thread(target=iniciar_tk, args=(keys_search, keys_posts, targets)), None
         return None, None
 
     if platform == 'x':
-        keys_search = list(ScraperKey.objects.filter(platform='x', purpose='search', is_active=True).values_list('key_value', flat=True))
-        keys_posts = list(ScraperKey.objects.filter(platform='x', purpose='posts', is_active=True).values_list('key_value', flat=True))
+        keys_search = ScraperKey.get_active_keys(platform='x', purpose='search')
+        keys_posts = ScraperKey.get_active_keys(platform='x', purpose='posts')
         if keys_search and keys_posts:
             return threading.Thread(target=iniciar_x, args=(keys_search, keys_posts, targets)), None
         return None, 'Faltan llaves de X (search o posts)'
@@ -79,7 +79,7 @@ def _build_extraction_thread(platform, targets):
         return threading.Thread(target=iniciar_yt, args=(targets,)), None
 
     if platform == 'fb':
-        keys = list(ScraperKey.objects.filter(platform='fb', is_active=True).values_list('key_value', flat=True))
+        keys = ScraperKey.get_active_keys(platform='fb')
         if keys:
             return threading.Thread(target=iniciar_fb, args=(keys[0], targets)), None
 
