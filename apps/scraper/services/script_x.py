@@ -75,18 +75,19 @@ def analizar_X_optimizado(keys_user, keys_timeline, lista_targets):
         # 1. Obtener rest_id si no está en caché
         if not user_info:
             while idx_u < len(keys_user):
-                headers_u = {"x-rapidapi-key": keys_user[idx_u], "x-rapidapi-host": "twitter241.p.rapidapi.com"}
+                headers_u = {"x-rapidapi-key": keys_user[idx_u], "x-rapidapi-host": "twitter-api45.p.rapidapi.com"}
                 try:
-                    res_u = requests.get("https://twitter241.p.rapidapi.com/user", 
-                                       headers=headers_u, params={"username": target}, timeout=10)
+                    res_u = requests.get("https://twitter-api45.p.rapidapi.com/screenname.php", 
+                                       headers=headers_u, params={"screenname": target}, timeout=10)
                     if res_u.status_code == 200:
                         data = res_u.json()
-                        info_profunda = data.get('result', {}).get('data', {}).get('user', {}).get('result', {})
+                        info_profunda = data
                         if info_profunda:
-                            legacy = info_profunda.get('legacy', {})
+                            legacy = info_profunda
+                            print(f" ✅ ID de @{target} obtenido: {info_profunda.get('rest_id')}")
                             user_info = {
                                 "rest_id": info_profunda.get('rest_id'),
-                                "followers": legacy.get('followers_count', 0)
+                                "followers": legacy.get('sub_count', 0)
                             }
                             cache_ids[target] = user_info
                             guardar_cache_ids(cache_ids)
