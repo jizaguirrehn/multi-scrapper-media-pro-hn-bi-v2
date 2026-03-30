@@ -84,7 +84,6 @@ def analizar_X_optimizado(keys_user, keys_timeline, lista_targets):
                         info_profunda = data
                         if info_profunda:
                             legacy = info_profunda
-                            print(f" ✅ ID de @{target} obtenido: {info_profunda.get('rest_id')}")
                             user_info = {
                                 "rest_id": info_profunda.get('rest_id'),
                                 "followers": legacy.get('sub_count', 0)
