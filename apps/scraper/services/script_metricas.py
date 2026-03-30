@@ -8,20 +8,17 @@ from django.db.models import Count, Avg, F, ExpressionWrapper, FloatField
 from django.db.models.functions import ExtractWeekDay
 from django.utils import timezone
 
-# Configuración de entorno
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 django.setup()
 
-from apps.scraper.models import ScrapeResult
+from apps.scraper.models import ScrapeResult, ExtractionRequestLog
 
 def mostrar_metricas():
     print("="*40)
     print("   DASHBOARD DE MÉTRICAS AVANZADAS")
     print("="*40)
 
-    # Definir rango de tiempo (Últimos 7 días)
-    # Usamos .replace(hour=0...) para asegurarnos de capturar el día completo
     ahora = timezone.now()
     hace_una_semana = ahora - datetime.timedelta(days=7)
     
@@ -32,7 +29,6 @@ def mostrar_metricas():
         print("La base de datos está vacía.")
         return
 
-    # 1. CÁLCULO DE ENGAGEMENT (PROMEDIO Y MEDIANA)
     queryset_engagement = ScrapeResult.objects.filter(followers__gt=0).annotate(
         engagement_val=ExpressionWrapper(
             (F('likes') + F('comments')) * 100.0 / F('followers'),
@@ -44,8 +40,6 @@ def mostrar_metricas():
     avg_engagement = round(statistics.mean(engagement_list), 2) if engagement_list else 0
     median_engagement = round(statistics.median(engagement_list), 2) if engagement_list else 0
 
-    # 2. VOLUMEN SEMANAL (CORREGIDO)
-    # Asegúrate de que el campo se llame 'created_at' en tu modelo
     volumen_semanal_raw = (
         ScrapeResult.objects.filter(created_at__gte=hace_una_semana)
         .annotate(day_num=ExtractWeekDay('created_at'))
@@ -62,12 +56,25 @@ def mostrar_metricas():
         for item in dist
     }
 
+    user_request_counts = (
+        ExtractionRequestLog.objects
+        .values('user_id')
+        .annotate(call_count=Count('id'))
+        .order_by('-call_count')
+    )
+    
+    users_calls = {
+        item['user__username'] if item['user__username'] else 'Anonymous': item['call_count']
+        for item in user_request_counts
+    }
+
     metricas = {
         "Posts Extracted": total_posts,
         "Total Profiles": ScrapeResult.objects.values('username').distinct().count(),
         "Avg Engagement": median_engagement,
         "Platform Distribution": platform_dist,
-        "Extraction Volume (Weekly)": weekly_stats
+        "Extraction Volume (Weekly)": weekly_stats,
+        "Users API Calls": users_calls
     }
 
     print(json.dumps(metricas, indent=4))

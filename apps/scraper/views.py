@@ -27,8 +27,12 @@ import datetime
 from django.http import JsonResponse
 import logging
 import statistics
+import requests
 
 logger = logging.getLogger(__name__)
+
+NO_PERMISSION_EXTRACTION_MSG = "No tienes permiso para iniciar extracciones"
+AZURE_OPENID_CONFIG_URL = "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration"
 
 from apps.scraper.services.script_ig import iniciar as iniciar_ig
 from apps.scraper.services.script_tk import iniciar as iniciar_tk
@@ -41,6 +45,82 @@ def _get_client_ip(request):
     if forwarded_for:
         return forwarded_for.split(',')[0].strip()
     return request.META.get('REMOTE_ADDR', '')
+
+
+def _update_request_log(request_log, status_value, detail):
+    request_log.status = status_value
+    request_log.detail = detail
+    request_log.save(update_fields=['status', 'detail'])
+
+
+def _build_extraction_thread(platform, targets):
+    if platform == 'ig':
+        keys = list(ScraperKey.objects.filter(platform='ig', is_active=True).values_list('key_value', flat=True))
+        if keys:
+            return threading.Thread(target=iniciar_ig, args=(keys, targets)), None
+        return None, None
+
+    if platform == 'tk':
+        keys_search = list(ScraperKey.objects.filter(platform='tk', purpose='search', is_active=True).values_list('key_value', flat=True))
+        keys_posts = list(ScraperKey.objects.filter(platform='tk', purpose='posts', is_active=True).values_list('key_value', flat=True))
+        if keys_search and keys_posts:
+            logger.info("TikTok keys loaded. search=%s posts=%s", len(keys_search), len(keys_posts))
+            return threading.Thread(target=iniciar_tk, args=(keys_search, keys_posts, targets)), None
+        return None, None
+
+    if platform == 'x':
+        keys_search = list(ScraperKey.objects.filter(platform='x', purpose='search', is_active=True).values_list('key_value', flat=True))
+        keys_posts = list(ScraperKey.objects.filter(platform='x', purpose='posts', is_active=True).values_list('key_value', flat=True))
+        if keys_search and keys_posts:
+            return threading.Thread(target=iniciar_x, args=(keys_search, keys_posts, targets)), None
+        return None, 'Faltan llaves de X (search o posts)'
+
+    if platform == 'yt':
+        return threading.Thread(target=iniciar_yt, args=(targets,)), None
+
+    if platform == 'fb':
+        keys = list(ScraperKey.objects.filter(platform='fb', is_active=True).values_list('key_value', flat=True))
+        if keys:
+            return threading.Thread(target=iniciar_fb, args=(keys[0], targets)), None
+
+    return None, None
+
+
+def _get_azure_signing_key(token):
+    header = jwt.get_unverified_header(token)
+    kid = header.get('kid')
+    if not kid:
+        raise ValueError('Token sin kid en el header')
+
+    oidc_config_resp = requests.get(AZURE_OPENID_CONFIG_URL, timeout=10)
+    oidc_config_resp.raise_for_status()
+    jwks_uri = oidc_config_resp.json().get('jwks_uri')
+    if not jwks_uri:
+        raise ValueError('No se encontró jwks_uri en OpenID configuration')
+
+    jwks_resp = requests.get(jwks_uri, timeout=10)
+    jwks_resp.raise_for_status()
+    keys = jwks_resp.json().get('keys', [])
+
+    for key in keys:
+        if key.get('kid') == kid:
+            return key
+
+    raise ValueError('No se encontró llave pública para validar la firma del token')
+
+
+def _decode_azure_access_token(token):
+    signing_key = _get_azure_signing_key(token)
+    return jwt.decode(
+        token,
+        signing_key,
+        algorithms=[signing_key.get('alg', 'RS256')],
+        options={
+            'verify_aud': False,
+            'verify_iss': False,
+            'verify_at_hash': False,
+        },
+    )
 
 class ScraperViewSet(viewsets.ViewSet):
 
@@ -71,76 +151,43 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['post'])
     def trigger_extraction(self, request):
-        platform = request.data.get('platform')
+        platform = (request.data.get('platform') or '').lower()
         targets = request.data.get('targets', [])
         request_log = ExtractionRequestLog.objects.create(
             user=request.user if request.user.is_authenticated else None,
-            platform=(platform or '').lower(),
+            platform=platform,
             targets=targets if isinstance(targets, list) else [targets],
             ip_address=_get_client_ip(request),
             status='PENDING',
         )
 
-        if request.user.groups.filter(name__in=['Colaborador']).exists():
-            request_log.status = 'DENIED'
-            request_log.detail = 'No tiene permiso para iniciar extracciones'
-            request_log.save(update_fields=['status', 'detail'])
-            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
+        if not request.user.groups.filter(name__in=['Admin_Scraper', 'Usuario', 'Gerente', 'Director']).exists():
+            _update_request_log(request_log, 'DENIED', 'No tiene permiso para iniciar extracciones')
+            return Response({"error": NO_PERMISSION_EXTRACTION_MSG}, status=403)
         
         start_time = timezone.now().isoformat()
 
         if not platform or not targets:
-            request_log.status = 'INVALID'
-            request_log.detail = 'Faltan parametros platform o targets'
-            request_log.save(update_fields=['status', 'detail'])
+            _update_request_log(request_log, 'INVALID', 'Faltan parametros platform o targets')
             return Response({'error': 'Faltan parámetros (platform o targets)'}, 
                             status=status.HTTP_400_BAD_REQUEST)
 
-        thread = None
-
-        if platform == 'ig':
-            keys = list(ScraperKey.objects.filter(platform='ig', is_active=True).values_list('key_value', flat=True))
-            if keys:
-                thread = threading.Thread(target=iniciar_ig, args=(keys, targets))
-        elif platform == 'tk':
-            keys_search = list(ScraperKey.objects.filter(platform='tk', purpose='search', is_active=True).values_list('key_value', flat=True))
-            keys_posts = list(ScraperKey.objects.filter(platform='tk', purpose='posts', is_active=True).values_list('key_value', flat=True))
-            
-            if keys_search and keys_posts:
-                print(f"DEBUG TikTok: Search Keys: {len(keys_search)}, Post Keys: {len(keys_posts)}")
-                thread = threading.Thread(target=iniciar_tk, args=(keys_search, keys_posts, targets))
-        elif platform == 'x':
-            keys_search = list(ScraperKey.objects.filter(platform='x', purpose='search', is_active=True).values_list('key_value', flat=True))
-            keys_posts = list(ScraperKey.objects.filter(platform='x', purpose='posts', is_active=True).values_list('key_value', flat=True))
-            if keys_search and keys_posts:
-                thread = threading.Thread(target=iniciar_x, args=(keys_search, keys_posts, targets))
-            else:
-                request_log.status = 'ERROR'
-                request_log.detail = 'Faltan llaves de X (search o posts)'
-                request_log.save(update_fields=['status', 'detail'])
-                return Response({'error': 'Faltan llaves de X (search o posts)'}, status=400)
-        elif platform == 'yt':
-            thread = threading.Thread(target=iniciar_yt, args=(targets,))
-        elif platform == 'fb':
-            keys = list(ScraperKey.objects.filter(platform='fb', is_active=True).values_list('key_value', flat=True))
-            if keys:
-                thread = threading.Thread(target=iniciar_fb, args=(keys[0], targets))
+        thread, thread_error = _build_extraction_thread(platform, targets)
+        if thread_error:
+            _update_request_log(request_log, 'ERROR', thread_error)
+            return Response({'error': thread_error}, status=400)
 
         if thread:
             thread.daemon = True
             thread.start()
-            request_log.status = 'STARTED'
-            request_log.detail = 'Extraccion iniciada'
-            request_log.save(update_fields=['status', 'detail'])
+            _update_request_log(request_log, 'STARTED', 'Extraccion iniciada')
             return Response({
                 'status': 'Extracción iniciada', 
                 'platform': platform,
                 'started_at': start_time
             }, status=status.HTTP_202_ACCEPTED)
         
-        request_log.status = 'ERROR'
-        request_log.detail = 'No se pudo iniciar el hilo. Revisa las llaves.'
-        request_log.save(update_fields=['status', 'detail'])
+        _update_request_log(request_log, 'ERROR', 'No se pudo iniciar el hilo. Revisa las llaves.')
         return Response({'error': 'No se pudo iniciar el hilo. Revisa las llaves.'}, status=400)
 
     
@@ -167,8 +214,8 @@ class ScraperViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'], url_path='user_history')
     def api_historico_usuario(self, request):
-        if request.user.groups.filter(name__in=['Colaborador']).exists():
-            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
+        if not request.user.groups.filter(name__in=['Admin_Scraper', 'Usuario', 'Gerente', 'Director']).exists():
+            return Response({"error": NO_PERMISSION_EXTRACTION_MSG}, status=403)
         try:
             criterio = request.GET.get('query', '').strip()
             
@@ -189,7 +236,7 @@ class ScraperViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def get_metrics(self, request):
         if not request.user.groups.filter(name__in=["Director", "Gerente", "Admin_Scraper"]).exists():
-            return Response({"error": "No tienes permiso para iniciar extracciones"}, status=403)
+            return Response({"error": NO_PERMISSION_EXTRACTION_MSG}, status=403)
         total_posts = ScrapeResult.objects.count()
         total_profiles = ScrapeResult.objects.values('username').distinct().count()
 
@@ -225,12 +272,27 @@ class ScraperViewSet(viewsets.ViewSet):
             d_idx = int(item['day_num'])
             weekly_volume[dias_map[d_idx]] = item['count']
 
+        # Obtener usuarios con cantidad de llamados desde ExtractionRequestLog (últimos 7 días)
+        user_calls_raw = (
+            ExtractionRequestLog.objects
+            .filter(created_at__gte=hace_una_semana)
+            .values('user__username')
+            .annotate(call_count=Count('id'))
+            .order_by('-call_count')
+        )
+        
+        users_api_calls = {
+            (item['user__username'] or 'Anonymous'): item['call_count']
+            for item in user_calls_raw
+        }
+
         return Response({
             "total_extracted": total_posts,
             "total_profiles": total_profiles,
             "avg_engagement": round(median_engagement, 2),
             "platform_distribution": platform_distribution,
-            "weekly_volume": weekly_volume
+            "weekly_volume": weekly_volume,
+            "users_api_calls": users_api_calls
         })
     
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
@@ -289,6 +351,60 @@ class ScraperViewSet(viewsets.ViewSet):
             
         users = User.objects.all().values('id', 'username', 'first_name', 'email')
         return Response(list(users), status=200)
+
+    @action(detail=False, methods=['get'], url_path='influencer_profile')
+    def influencer_profile(self, request):
+        if not request.user.groups.filter(name__in=['Admin_Scraper', 'Usuario', 'Gerente', 'Director']).exists():
+            return Response({"error": "No tienes permiso para consultar perfiles"}, status=403)
+
+        username = request.query_params.get('username', '').strip()
+
+        influencers_list = list(
+            ScrapeResult.objects.exclude(username__isnull=True)
+            .exclude(username='')
+            .order_by('username')
+            .values_list('username', flat=True)
+            .distinct()
+        )
+
+        if not username:
+            return Response({
+                "error": "Debes enviar el parámetro username",
+                "influencers_list": influencers_list
+            }, status=400)
+
+        influencer_qs = ScrapeResult.objects.filter(username__iexact=username).order_by('-created_at')
+        if not influencer_qs.exists():
+            return Response({
+                "error": f"No se encontró información para {username}",
+                "influencers_list": influencers_list
+            }, status=404)
+
+        influencer_posts = ScrapeResultSerializer(influencer_qs, many=True).data
+        latest_record = influencer_qs.first()
+
+        return Response({
+            "influencer": {
+                "username": latest_record.username,
+                "total_posts": influencer_qs.count(),
+                "latest_platform": latest_record.platform,
+                "latest_followers": latest_record.followers,
+                "latest_post_date": latest_record.post_date,
+                "last_updated": latest_record.created_at,
+                "sentimiento_global": latest_record.sentimiento_global,
+                "is_loto": latest_record.is_loto,
+                "alegria": latest_record.alegria,
+                "confianza": latest_record.confianza,
+                "miedo": latest_record.miedo,
+                "sorpresa": latest_record.sorpresa,
+                "tristeza": latest_record.tristeza,
+                "aversion": latest_record.aversion,
+                "ira": latest_record.ira,
+                "anticipacion": latest_record.anticipacion,
+                "posts": influencer_posts
+            },
+            "influencers_list": influencers_list
+        }, status=200)
     
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -299,16 +415,7 @@ def azure_login(request):
         return Response({"error": "No token provided"}, status=400)
     
     try:
-        payload = jwt.decode(
-            token, 
-            None, 
-            options={
-                "verify_signature": False, 
-                "verify_aud": False, 
-                "verify_iss": False, 
-                "verify_at_hash": False
-            }
-        )
+        payload = _decode_azure_access_token(token)
         
         email = payload.get('email') or payload.get('preferred_username')
         full_name = payload.get('name', 'Usuario Loto')
