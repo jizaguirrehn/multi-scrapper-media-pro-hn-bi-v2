@@ -298,6 +298,40 @@ class ScraperViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], permission_classes=[AllowAny])
     def public_status(self, request):
         return Response({"status": "Servidor Vivo", "version": "1.6.1"})
+
+    @action(detail=False, methods=['post'], url_path='change_password')
+    def change_password(self, request):
+        """Solo Admin_Scraper: cambia la contraseña de un usuario por su username o email."""
+        if not request.user.groups.filter(name='Admin_Scraper').exists() and not request.user.is_superuser:
+            return Response({"error": "No tienes permiso para cambiar contraseñas"}, status=403)
+
+        username = request.data.get('username', '').strip()
+        email_data = request.data.get('email', '').strip()
+        new_password = request.data.get('new_password', '').strip()
+
+        if not username and not email_data:
+            return Response({"error": "Debes enviar username o email"}, status=400)
+        if not new_password:
+            return Response({"error": "Debes enviar new_password"}, status=400)
+        if len(new_password) < 8:
+            return Response({"error": "La contraseña debe tener al menos 8 caracteres"}, status=400)
+
+        try:
+            if username:
+                user = User.objects.get(username__iexact=username)
+            else:
+                user = User.objects.get(email__iexact=email_data)
+        except User.DoesNotExist:
+            return Response({"error": "Usuario no encontrado"}, status=404)
+
+        user.set_password(new_password)
+        user.save(update_fields=['password'])
+        logger.info("Admin %s cambió contraseña del usuario %s", request.user.username, user.username)
+
+        return Response({
+            "status": "success",
+            "message": f"Contraseña actualizada para el usuario {user.username}",
+        })
     
     @action(detail=False, methods=['post'], url_path='assign_role')
     def assign_role(self, request):
