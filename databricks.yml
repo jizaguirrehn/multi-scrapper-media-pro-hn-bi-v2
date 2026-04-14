@@ -1,0 +1,19 @@
+# This is a Databricks asset bundle definition for multi-scrapper-media-pro-hn-bi-v2.
+# The Databricks extension requires databricks.yml configuration file.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: multi-scrapper-media-pro-hn-bi-v2
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-3019166352521346.6.azuredatabricks.net
+
+  ## Optionally, there could be 'staging' or 'prod' targets here.
+  #
+  # prod:
+  #   workspace:
+  #     host: https://adb-3019166352521346.6.azuredatabricks.net
