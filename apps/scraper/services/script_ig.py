@@ -210,6 +210,9 @@ def _obtener_info_usuario(target, lista_keys, key_index):
         "x-rapidapi-key": lista_keys[key_index],
         "x-rapidapi-host": HOST,
     }
+
+    seguidores = 0
+
     try:
         response = requests.get(
             url_perfil,
@@ -220,14 +223,19 @@ def _obtener_info_usuario(target, lista_keys, key_index):
         if response.status_code == 200:
             data = response.json()
             _guardar_json_local("usuarios", target, data)
+
+            user_data = data.get("user_data", {})
+            seguidores = user_data.get("follower_count", 0)
+            
     except Exception as e:
         print(f"Error obteniendo perfil/usuario de @{target}: {e}")
+    return seguidores
 
 
 def _procesar_target(target, lista_keys, key_actual_index, nombre_archivo):
     """Realiza la petición de posts del perfil, extrae la lista y delega el guardado/análisis."""
-    _obtener_info_usuario(target, lista_keys, key_actual_index)
-
+    seguidores_perfil = _obtener_info_usuario(target, lista_keys, key_actual_index)
+    
     url_posts = f"https://{HOST}/get_ig_user_posts.php"
     target_url = target if target.startswith("http") else f"https://www.instagram.com/{target}/"
 
@@ -265,7 +273,7 @@ def _procesar_target(target, lista_keys, key_actual_index, nombre_archivo):
                 or res_data.get("data", {}).get("items", [])
             )
             user_info = res_data.get("user", {}) or {}
-            seguidores = user_info.get("follower_count", 0)
+            seguidores = user_info.get("follower_count") or seguidores_perfil
 
             nuevo_idx = _guardar_posts_en_csv(
                 nombre_archivo,
