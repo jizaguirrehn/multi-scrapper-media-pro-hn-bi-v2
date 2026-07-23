@@ -1,13 +1,18 @@
-import requests
 import csv
 import json
+import logging
 import os
 import pandas as pd
+import requests
 from datetime import datetime
-# Importación del modelo de Django
-from apps.scraper.models import ScrapeResult
+
+# Importación del modelo de Django y utilidades
 from django.utils.timezone import make_aware
+from apps.scraper.models import ScrapeResult
 from apps.scraper.services.sentiments.analizador import get_data
+
+# Instancia del logger vinculada al contexto/módulo de Django
+logger = logging.getLogger(__name__)
 
 ARCHIVO_IDS = "usuarios_tiktok_registrados.json"
 HOY = datetime.now().strftime("%Y_%m_%d")
@@ -33,8 +38,13 @@ def _obtener_comentarios_post(video_id, keys_posts, key_index):
                 timeout=15
             )
             if response.status_code == 429:
+                logger.warning(
+                    "Rate limit (429) alcanzado al obtener comentarios de TikTok. Rotando API key.",
+                    extra={"video_id": video_id, "key_index_fallida": idx}
+                )
                 idx += 1
                 continue
+
             if response.status_code == 200:
                 comentarios = response.json().get('data', {}).get('comments', []) or []
                 textos = [
@@ -42,11 +52,20 @@ def _obtener_comentarios_post(video_id, keys_posts, key_index):
                     for c in comentarios
                     if c.get('text', '').strip()
                 ]
-                print(f"    [TK Sentimiento] {len(textos)} comentarios obtenidos para video {video_id}")
+                logger.info(
+                    "Comentarios de TikTok obtenidos exitosamente",
+                    extra={"video_id": video_id, "total_comentarios": len(textos)}
+                )
                 return textos
+
+            logger.error(
+                "Error HTTP al solicitar comentarios de TikTok",
+                extra={"video_id": video_id, "status_code": response.status_code, "response": response.text}
+            )
             break
-        except Exception as e:
-            print(f"Error obteniendo comentarios TK (video_id={video_id}): {e}")
+
+        except Exception:
+            logger.exception("Excepción obteniendo comentarios TK", extra={"video_id": video_id})
             idx += 1
 
     return []
@@ -61,6 +80,7 @@ def _analizar_sentimiento(textos):
     sentimiento_global = 'N/A'
 
     if not textos:
+        logger.debug("No hay comentarios para analizar sentimiento (TikTok).")
         return pesos, sentimiento_global
 
     try:
@@ -84,25 +104,27 @@ def _analizar_sentimiento(textos):
             pesos['anticipacion'] = float(sumas.get('Anticipación', 0.0))
 
             sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
+            logger.info("Análisis de sentimiento (TikTok) finalizado", extra={"sentimiento_global": sentimiento_global})
 
-    except Exception as e:
-        print(f"Error en análisis de sentimiento (TikTok): {e}")
+    except Exception:
+        logger.exception("Error en análisis de sentimiento (TikTok)")
 
     return pesos, sentimiento_global
 
 
 def guardar_en_db(target, seguidores, fecha_str, likes, comentarios, vistas, desc, pesos=None, sentimiento_global='N/A'):
+    """Recibe los datos del scrapeo de TikTok y los almacena en la base de datos Django."""
     try:
         fecha_dt = None
         if fecha_str and fecha_str != "N/A":
             try:
                 naive_datetime = datetime.strptime(fecha_str, '%d/%m/%Y %H:%M:%S')
                 fecha_dt = make_aware(naive_datetime)
-            except Exception as e_fecha:
-                print(f"Error parseando fecha {fecha_str}: {e_fecha}")
+            except Exception:
+                logger.exception("Error parseando fecha recibida de TikTok", extra={"fecha_str": fecha_str, "target": target})
 
         p = pesos or {}
-        ScrapeResult.objects.create(
+        obj = ScrapeResult.objects.create(
             platform='tk',
             username=target,
             followers=seguidores if isinstance(seguidores, int) else 0,
@@ -121,23 +143,37 @@ def guardar_en_db(target, seguidores, fecha_str, likes, comentarios, vistas, des
             ira=p.get('ira', 0.0),
             anticipacion=p.get('anticipacion', 0.0),
         )
-    except Exception as e:
-        print(f"Error crítico al guardar en DB (TikTok): {e}")
+        logger.info(
+            "Registro insertado en DB exitosamente (TikTok)",
+            extra={"target": target, "scrape_result_id": obj.id, "sentimiento": sentimiento_global}
+        )
+    except Exception:
+        logger.exception("Error crítico al guardar en DB (TikTok)", extra={"target": target})
 
 
 def cargar_cache_ids():
+    """Carga los IDs guardados localmente."""
     if os.path.exists(ARCHIVO_IDS):
-        with open(ARCHIVO_IDS, 'r') as f:
-            return json.load(f)
+        try:
+            with open(ARCHIVO_IDS, 'r') as f:
+                return json.load(f)
+        except Exception:
+            logger.exception("Error leyendo archivo de cache de IDs")
     return {}
 
+
 def guardar_cache_ids(cache):
-    with open(ARCHIVO_IDS, 'w') as f:
-        json.dump(cache, f, indent=4)
+    """Persiste en disco los datos de caché de usuarios."""
+    try:
+        with open(ARCHIVO_IDS, 'w') as f:
+            json.dump(cache, f, indent=4)
+        logger.debug("Cache de IDs de TikTok actualizado correctamente.")
+    except Exception:
+        logger.exception("Error guardando cache de IDs de TikTok")
+
 
 def _obtener_info_perfil(target, keys_search, idx_s, cache_uids):
-    """Consulta la API de usuario TikTok para obtener secUid, followers y hearts.
-    Retorna (info_perfil, nuevo_idx_s)."""
+    """Consulta la API de usuario TikTok para obtener secUid, followers y hearts. Retorna (info_perfil, nuevo_idx_s)."""
     while idx_s < len(keys_search):
         headers = {
             "x-rapidapi-key": keys_search[idx_s],
@@ -159,11 +195,18 @@ def _obtener_info_perfil(target, keys_search, idx_s, cache_uids):
                     }
                     cache_uids[target] = info
                     guardar_cache_ids(cache_uids)
+                    logger.info("Información de perfil obtenida y cacheada", extra={"target": target, "followers": info["followers"]})
                     return info, idx_s
+
+            logger.warning(
+                "Respuesta no exitosa al consultar perfil TK",
+                extra={"target": target, "status_code": res.status_code, "key_index": idx_s}
+            )
             idx_s += 1
-        except Exception as e:
-            print(f"Error obteniendo perfil TK (@{target}): {e}")
+        except Exception:
+            logger.exception("Error obteniendo perfil TK", extra={"target": target, "key_index": idx_s})
             idx_s += 1
+
     return None, idx_s
 
 
@@ -180,12 +223,16 @@ def _procesar_video(item, target, seguidores, corazones, keys_posts, idx_p, writ
     video_id = str(raw_id) if str(raw_id).isdigit() else None
 
     if not video_id:
-        print(f"  Video {raw_id}: ID no numérico, se omiten comentarios")
+        logger.warning("ID de video no numérico. Se omiten comentarios.", extra={"raw_id": raw_id, "target": target})
 
     textos = _obtener_comentarios_post(video_id, keys_posts, idx_p) if video_id else []
     pesos, sentimiento_global = _analizar_sentimiento(textos)
 
-    print(f"  Video {video_id}: sentimiento={sentimiento_global}")
+    logger.info(
+        "Procesando métricas de Video TikTok",
+        extra={"video_id": video_id, "sentimiento": sentimiento_global, "target": target}
+    )
+
     writer.writerow([target, seguidores, corazones, fecha_txt, likes, vistas, descripcion])
     guardar_en_db(
         target, seguidores, fecha_txt, likes, comentarios, vistas, descripcion,
@@ -212,16 +259,25 @@ def _obtener_y_procesar_posts(target, sec_uid, seguidores, corazones, keys_posts
                         writer = csv.writer(f)
                         for item in items:
                             _procesar_video(item, target, seguidores, corazones, keys_posts, idx_p, writer)
-                    print(f"  @{target} procesado y sincronizado con Django.")
+                    logger.info("Posts de perfil procesados y sincronizados", extra={"target": target, "total_videos": len(items)})
+                else:
+                    logger.warning("El perfil no contiene videos o la respuesta retornó lista vacía", extra={"target": target})
                 return True, idx_p
+
+            logger.warning(
+                "Status HTTP no exitoso obteniendo posts de TikTok",
+                extra={"target": target, "status_code": res_p.status_code, "key_index": idx_p}
+            )
             idx_p += 1
-        except Exception as e:
-            print(f"Error obteniendo posts TK (@{target}): {e}")
+        except Exception:
+            logger.exception("Error obteniendo posts TK", extra={"target": target, "key_index": idx_p})
             idx_p += 1
+
     return False, idx_p
 
 
 def analizar_tiktok_optimizado(keys_search, keys_posts, lista_targets):
+    """Coordina la búsqueda, rotación de keys y extracción de datos."""
     cache_uids = cargar_cache_ids()
     nombre_csv = f"results/datos_tk_{HOY}.csv"
     idx_s, idx_p = 0, 0
@@ -235,6 +291,7 @@ def analizar_tiktok_optimizado(keys_search, keys_posts, lista_targets):
             writer.writerow(['USUARIO', 'SEGUIDORES', 'CORAZONES_TOTALES', 'FECHA_POST', 'LIKES_VIDEO', 'VISTAS', 'DESCRIPCION'])
 
     for target in lista_targets:
+        logger.info("Procesando objetivo TikTok", extra={"target": target})
         info_perfil = cache_uids.get(target)
 
         if not info_perfil:
@@ -244,11 +301,24 @@ def analizar_tiktok_optimizado(keys_search, keys_posts, lista_targets):
             sec_uid = info_perfil.get("secUid")
             seguidores = info_perfil.get("followers")
             corazones = info_perfil.get("hearts")
-            _, idx_p = _obtener_y_procesar_posts(
+            exito, idx_p = _obtener_y_procesar_posts(
                 target, sec_uid, seguidores, corazones, keys_posts, idx_p, nombre_csv
             )
+            if not exito:
+                logger.error("No se pudieron procesar los posts del objetivo", extra={"target": target})
+        else:
+            logger.error("No fue posible resolver la información del perfil del objetivo", extra={"target": target})
+
+        if idx_s >= len(keys_search) or idx_p >= len(keys_posts):
+            logger.critical("Se agotaron las llaves API de búsqueda o contenido de TikTok. Deteniendo proceso.")
+            break
 
 
 def iniciar(keys_de_100, keys_de_300, lista_perfiles):
-    print("\n--- INICIANDO MÓDULO TIKTOK (DB CONNECTED) ---")
+    """Punto de entrada de ejecución del módulo de TikTok."""
+    logger.info(
+        "Iniciando módulo de extracción TikTok",
+        extra={"total_search_keys": len(keys_de_100), "total_posts_keys": len(keys_de_300), "total_perfiles": len(lista_perfiles)}
+    )
     analizar_tiktok_optimizado(keys_de_100, keys_de_300, lista_perfiles)
+    logger.info("Módulo TikTok finalizado.")
