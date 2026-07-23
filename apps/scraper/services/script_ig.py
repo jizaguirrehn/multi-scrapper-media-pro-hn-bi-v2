@@ -1,20 +1,25 @@
 import csv
 import json
+import logging
 import os
 from datetime import datetime
+
 import pandas as pd
 import requests
+from django.utils.timezone import make_aware
 
 from apps.scraper.models import ScrapeResult
-from django.utils.timezone import make_aware
 from apps.scraper.services.sentiments.analizador import get_data
+
+# Instancia del logger vinculada al contexto/módulo de Django
+logger = logging.getLogger(__name__)
 
 HOY = datetime.now().strftime("%Y_%m_%d")
 HOST = "instagram-scraper-stable-api.p.rapidapi.com"
 JSON_DIR = "json_logs"
 
 
-def _guardar_json_local(categoria, identificador, data):
+def _guardar_json_local(categoria: str, identificador: str, data: dict) -> None:
     """Guarda las respuestas JSON de las peticiones en carpetas clasificadas."""
     try:
         folder_path = os.path.join(JSON_DIR, HOY, categoria)
@@ -26,12 +31,19 @@ def _guardar_json_local(categoria, identificador, data):
 
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
-        print(f"   [JSON] Guardado en: {filepath}")
-    except Exception as e:
-        print(f"Error guardando JSON local para {categoria}/{identificador}: {e}")
+
+        logger.debug(
+            "[JSON] Guardado exitosamente localmente",
+            extra={"categoria": categoria, "identificador": identificador, "filepath": filepath}
+        )
+    except Exception:
+        logger.exception(
+            "Error al guardar JSON local",
+            extra={"categoria": categoria, "identificador": identificador}
+        )
 
 
-def _obtener_comentarios_post(media_code, lista_keys, key_index):
+def _obtener_comentarios_post(media_code: str, lista_keys: list, key_index: int) -> tuple[list, int]:
     """Obtiene los comentarios de un post para el análisis de sentimiento."""
     url = f"https://{HOST}/get_post_comments.php"
     idx = key_index
@@ -44,11 +56,15 @@ def _obtener_comentarios_post(media_code, lista_keys, key_index):
             "Content-Type": "application/json",
         }
         params = {"media_code": media_code, "sort_order": "popular"}
+        
         try:
             response = requests.get(url, headers=headers, params=params, timeout=15)
 
             if response.status_code == 429:
-                print(f"Rate limit (429) en Key índice {idx}. Probando siguiente key...")
+                logger.warning(
+                    "Rate limit (429) alcanzado al obtener comentarios. Rotando API key.",
+                    extra={"media_code": media_code, "key_index_fallida": idx}
+                )
                 idx += 1
                 continue
 
@@ -61,18 +77,28 @@ def _obtener_comentarios_post(media_code, lista_keys, key_index):
                     texto = comment.get("text", "").strip()
                     if texto:
                         comentarios.append(texto)
+                
+                logger.info(
+                    "Comentarios obtenidos con éxito",
+                    extra={"media_code": media_code, "total_comentarios": len(comentarios)}
+                )
                 return comentarios, idx
 
+            logger.error(
+                "Error HTTP al solicitar comentarios",
+                extra={"media_code": media_code, "status_code": response.status_code, "response": response.text}
+            )
             break
-        except Exception as e:
-            print(f"Error obteniendo comentarios del post {media_code}: {e}")
+
+        except Exception:
+            logger.exception("Excepción durante la llamada a API de comentarios", extra={"media_code": media_code})
             idx += 1
 
     return comentarios, idx
 
 
-def _analizar_sentimiento(textos):
-    """Analiza una lista de textos (comentarios) con el modelo Databricks y retorna pesos + sentimiento global."""
+def _analizar_sentimiento(textos: list) -> tuple[dict, str]:
+    """Analiza una lista de textos (comentarios) con el modelo Databricks."""
     pesos = {
         'alegria': 0.0, 'confianza': 0.0, 'miedo': 0.0, 'sorpresa': 0.0,
         'tristeza': 0.0, 'aversion': 0.0, 'ira': 0.0, 'anticipacion': 0.0
@@ -80,6 +106,7 @@ def _analizar_sentimiento(textos):
     sentimiento_global = 'N/A'
 
     if not textos:
+        logger.debug("No hay comentarios para analizar sentimiento.")
         return pesos, sentimiento_global
 
     try:
@@ -103,9 +130,11 @@ def _analizar_sentimiento(textos):
             pesos['anticipacion'] = float(sumas.get('Anticipación', 0.0))
 
             sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
+            
+            logger.info("Análisis de sentimiento finalizado", extra={"sentimiento_global": sentimiento_global})
 
-    except Exception as e:
-        print(f"Error en análisis de sentimiento (Instagram): {e}")
+    except Exception:
+        logger.exception("Error durante el análisis de sentimiento ML/Databricks")
 
     return pesos, sentimiento_global
 
@@ -115,13 +144,10 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, pesos=None,
     try:
         fecha_dt = None
         if fecha_obj:
-            if fecha_obj.tzinfo is None:
-                fecha_dt = make_aware(fecha_obj)
-            else:
-                fecha_dt = fecha_obj
+            fecha_dt = make_aware(fecha_obj) if fecha_obj.tzinfo is None else fecha_obj
 
         p = pesos or {}
-        ScrapeResult.objects.create(
+        obj = ScrapeResult.objects.create(
             platform='ig',
             username=target,
             followers=seguidores,
@@ -139,9 +165,12 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, pesos=None,
             ira=p.get('ira', 0.0),
             anticipacion=p.get('anticipacion', 0.0),
         )
-        print(f"   [DB Django] Guardado exitoso -> @{target} | Sentimiento: {sentimiento_global}")
-    except Exception as e:
-        print(f"Error al guardar en DB (Instagram): {e}")
+        logger.info(
+            "Registro insertado en DB exitosamente",
+            extra={"target": target, "scrape_result_id": obj.id, "sentimiento": sentimiento_global}
+        )
+    except Exception:
+        logger.exception("Fallo en la persistencia con la Base de Datos Django", extra={"target": target})
 
 
 def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys, key_index):
@@ -156,6 +185,7 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
 
             code = node.get("code") or node.get("shortcode")
             if not code:
+                logger.warning("Nodo de post omitido por no poseer 'code' o 'shortcode'.", extra={"target": target})
                 continue
 
             caption_data = node.get("caption")
@@ -175,29 +205,19 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
             likes = node.get("like_count", 0)
             comms = node.get("comment_count", 0)
 
-            # 1. Obtener comentarios del post
-            comentarios, current_key_idx = _obtener_comentarios_post(
-                code, lista_keys, current_key_idx
-            )
-
-            # 2. Analizar sentimiento real usando la lista de comentarios obtenidos
+            comentarios, current_key_idx = _obtener_comentarios_post(code, lista_keys, current_key_idx)
             pesos, sentimiento_global = _analizar_sentimiento(comentarios)
 
-            print(f"   Post {code}: {len(comentarios)} comentarios. Sentimiento={sentimiento_global}")
+            logger.info(
+                "Procesando métricas de Post",
+                extra={"code": code, "total_comentarios": len(comentarios), "sentimiento": sentimiento_global}
+            )
 
-            # 3. Guardar en CSV
             writer.writerow([target, seguidores, fecha_csv, "Post", likes, comms, desc, sentimiento_global])
 
-            # 4. Guardar en Base de Datos
             guardar_en_db(
-                target,
-                seguidores,
-                fecha_dt_obj,
-                likes,
-                comms,
-                desc,
-                pesos=pesos,
-                sentimiento_global=sentimiento_global,
+                target, seguidores, fecha_dt_obj, likes, comms, desc,
+                pesos=pesos, sentimiento_global=sentimiento_global,
             )
 
     return current_key_idx
@@ -226,14 +246,22 @@ def _obtener_info_usuario(target, lista_keys, key_index):
 
             user_data = data.get("user_data", {})
             seguidores = user_data.get("follower_count", 0)
-            
-    except Exception as e:
-        print(f"Error obteniendo perfil/usuario de @{target}: {e}")
+            logger.info("Información de usuario obtenida", extra={"target": target, "seguidores": seguidores})
+        else:
+            logger.warning(
+                "No se pudo obtener información del perfil",
+                extra={"target": target, "status_code": response.status_code}
+            )
+
+    except Exception:
+        logger.exception("Error solicitando información de usuario", extra={"target": target})
+
     return seguidores
 
 
 def _procesar_target(target, lista_keys, key_actual_index, nombre_archivo):
     """Realiza la petición de posts del perfil, extrae la lista y delega el guardado/análisis."""
+    logger.info("Iniciando procesamiento de perfil", extra={"target": target})
     seguidores_perfil = _obtener_info_usuario(target, lista_keys, key_actual_index)
     
     url_posts = f"https://{HOST}/get_ig_user_posts.php"
@@ -255,14 +283,20 @@ def _procesar_target(target, lista_keys, key_actual_index, nombre_archivo):
         response = requests.post(url_posts, headers=headers, data=payload, timeout=15)
 
         if response.status_code == 429:
-            print(f"Rate limit (429) obteniendo posts de @{target}. Cambiando de key...")
+            logger.warning(
+                "Rate limit (429) al obtener posts del target. Rotando key...",
+                extra={"target": target, "key_index": key_actual_index}
+            )
             return False, key_actual_index + 1
 
         if response.status_code == 200:
             res_data = response.json()
 
             if "error" in res_data:
-                print(f"Error devuelto por la API para @{target}: {res_data['error']}")
+                logger.error(
+                    "Error retornado directamente en payload JSON de la API",
+                    extra={"target": target, "api_error": res_data['error']}
+                )
                 return False, key_actual_index
 
             _guardar_json_local("posts", target, res_data)
@@ -276,21 +310,19 @@ def _procesar_target(target, lista_keys, key_actual_index, nombre_archivo):
             seguidores = user_info.get("follower_count") or seguidores_perfil
 
             nuevo_idx = _guardar_posts_en_csv(
-                nombre_archivo,
-                target,
-                seguidores,
-                posts,
-                lista_keys,
-                key_actual_index,
+                nombre_archivo, target, seguidores, posts, lista_keys, key_actual_index,
             )
-            print(f" @{target} procesado exitosamente.\n")
+            logger.info("Perfil procesado exitosamente", extra={"target": target})
             return True, nuevo_idx
 
-        print(f"Error HTTP {response.status_code} al procesar @{target}")
+        logger.error(
+            "Error HTTP en petición de posts del target",
+            extra={"target": target, "status_code": response.status_code}
+        )
         return False, key_actual_index + 1
 
-    except Exception as e:
-        print(f"Error procesando @{target}: {e}")
+    except Exception:
+        logger.exception("Excepción crítica al procesar target", extra={"target": target})
         return False, key_actual_index + 1
 
 
@@ -314,16 +346,16 @@ def analizar_con_rotacion(lista_keys, lista_targets):
             exito, key_actual_index = _procesar_target(
                 target, lista_keys, key_actual_index, nombre_archivo
             )
+            
+        if key_actual_index >= len(lista_keys):
+            logger.critical("Se agotaron todas las API Keys disponibles. Deteniendo proceso.")
+            break
 
 
 def iniciar(mis_apis_keys, lista_perfiles):
+    logger.info(
+        "Iniciando flujo de recolección y análisis",
+        extra={"total_keys": len(mis_apis_keys), "total_perfiles": len(lista_perfiles)}
+    )
     analizar_con_rotacion(mis_apis_keys, lista_perfiles)
-
-
-if __name__ == "__main__":
-    mis_apis_keys = [os.getenv("RAPIDAPI_KEY", "TU_API_KEY_AQUI")]
-    lista_perfiles = ["test"]
-
-    print("Iniciando procesamiento de posts y análisis de sentimiento...")
-    iniciar(mis_apis_keys, lista_perfiles)
-    print("Proceso completado.")
+    logger.info("Flujo de recolección y análisis finalizado exitosamente.")
