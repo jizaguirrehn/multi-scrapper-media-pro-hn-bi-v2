@@ -51,7 +51,7 @@ class get_data:
         )
 
         start_time = time.time()
-        response = requests.post(url, headers=headers, data=data_json, timeout=30)
+        response = requests.post(url, headers=headers, data=data_json, timeout=160)
         duration = round(time.time() - start_time, 3)
 
         if response.status_code != 200:

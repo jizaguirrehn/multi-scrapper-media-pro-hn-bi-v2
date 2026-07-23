@@ -35,7 +35,7 @@ def _obtener_comentarios_post(video_id, keys_posts, key_index):
                 url,
                 headers=headers,
                 params={"url": str(video_id), "count": "25", "cursor": "0"},
-                timeout=15
+                timeout=30
             )
             if response.status_code == 429:
                 logger.warning(
@@ -182,7 +182,7 @@ def _obtener_info_perfil(target, keys_search, idx_s, cache_uids):
         try:
             res = requests.get(
                 "https://tiktok-api23.p.rapidapi.com/api/user/info",
-                headers=headers, params={"uniqueId": target}, timeout=10
+                headers=headers, params={"uniqueId": target}, timeout=40
             )
             if res.status_code == 200:
                 user_info = res.json().get('userInfo', {})
@@ -250,7 +250,7 @@ def _obtener_y_procesar_posts(target, sec_uid, seguidores, corazones, keys_posts
         try:
             res_p = requests.get(
                 "https://tiktok-scraper7.p.rapidapi.com/user/posts",
-                headers=headers_p, params={"user_id": sec_uid, "count": "35"}, timeout=15
+                headers=headers_p, params={"user_id": sec_uid, "count": "35"}, timeout=30
             )
             if res_p.status_code == 200:
                 items = res_p.json().get('data', {}).get('videos', [])
