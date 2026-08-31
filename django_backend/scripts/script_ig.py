@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 from datetime import datetime
 import requests
 
@@ -69,6 +70,19 @@ def _obtener_comentarios_post(media_code, lista_keys, key_index):
     return comentarios, idx
 
 
+def extraer_hashtags(texto):
+    """
+    Extrae todos los hashtags de un texto.
+    Retorna una lista de hashtags sin el símbolo #
+    """
+    if not texto:
+        return []
+    # Busca todas las palabras que comienzan con #
+    hashtags = re.findall(r'#\w+', texto)
+    # Remueve el # y devuelve la lista
+    return [tag.lstrip('#') for tag in hashtags]
+
+
 def analizar_sentimiento(comentarios):
     """
     Procesa la lista de comentarios para determinar métricas de sentimiento.
@@ -89,7 +103,7 @@ def analizar_sentimiento(comentarios):
     return pesos, sentimiento_global
 
 
-def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, pesos=None, sentimiento_global="N/A"):
+def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, hashtags=None, pesos=None, sentimiento_global="N/A"):
     """
     Guarda los resultados del scrapeo y el sentimiento derivado de los comentarios en Django DB.
     """
@@ -101,6 +115,12 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, pesos=None,
             else:
                 fecha_dt = fecha_obj
 
+        if hashtags is None:
+            hashtags = []
+
+        # Convertir hashtags a string separado por comas
+        hashtags_str = ",".join(hashtags) if hashtags else ""
+
         ScrapeResult.objects.create(
             platform='ig',
             username=target,
@@ -109,11 +129,18 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, pesos=None,
             likes=likes,
             comments=comms,
             description=desc,
-            # Descomentar/ajustar si la tabla en DB incluye campos de sentimiento:
-            # sentiment_label=sentimiento_global,
-            # sentiment_weights=pesos
+            hashtags=hashtags_str,
+            sentimiento_global=sentimiento_global,
+            alegria=float(pesos.get("alegria", 0.0)) if pesos else 0.0,
+            confianza=float(pesos.get("confianza", 0.0)) if pesos else 0.0,
+            miedo=float(pesos.get("miedo", 0.0)) if pesos else 0.0,
+            sorpresa=float(pesos.get("sorpresa", 0.0)) if pesos else 0.0,
+            tristeza=float(pesos.get("tristeza", 0.0)) if pesos else 0.0,
+            aversion=float(pesos.get("aversion", 0.0)) if pesos else 0.0,
+            ira=float(pesos.get("ira", 0.0)) if pesos else 0.0,
+            anticipacion=float(pesos.get("anticipacion", 0.0)) if pesos else 0.0,
         )
-        print(f"   [DB Django] Guardado exitoso -> @{target} | Sentimiento: {sentimiento_global}")
+        print(f"   [DB Django] Guardado exitoso -> @{target} | Sentimiento: {sentimiento_global} | Hashtags: {hashtags}")
     except Exception as e:
         print(f"Error al guardar en DB (Instagram): {e}")
 
@@ -140,6 +167,9 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
                 caption = ""
 
             desc = caption.replace("\n", " ")
+            
+            # Extrae hashtags del caption
+            hashtags = extraer_hashtags(caption)
 
             timestamp = node.get("taken_at") or node.get("taken_at_timestamp")
             fecha_dt_obj = datetime.fromtimestamp(timestamp) if timestamp else None
@@ -159,7 +189,8 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
             print(f"   Post {code}: {len(comentarios)} comentarios analizados. Sentimiento = {sentimiento_global}")
 
             # 3. Guardado en archivo CSV
-            writer.writerow([target, seguidores, fecha_csv, "Post", likes, comms, desc, sentimiento_global])
+            hashtags_csv = ",".join(hashtags)
+            writer.writerow([target, seguidores, fecha_csv, "Post", likes, comms, desc, sentimiento_global, hashtags_csv])
 
             # 4. Persistence real en Django DB
             guardar_en_db(
@@ -169,6 +200,7 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
                 likes,
                 comms,
                 desc,
+                hashtags=hashtags,
                 pesos=pesos,
                 sentimiento_global=sentimiento_global,
             )
@@ -268,7 +300,7 @@ def analizar_con_rotacion(lista_keys, lista_targets):
         with open(nombre_archivo, mode="w", newline="", encoding="utf-8-sig") as file:
             writer = csv.writer(file)
             writer.writerow(
-                ["USUARIO", "SEGUIDORES", "FECHA", "TIPO", "LIKES", "COMMS", "DESCRIPCION", "SENTIMIENTO"]
+                ["USUARIO", "SEGUIDORES", "FECHA", "TIPO", "LIKES", "COMMS", "DESCRIPCION", "SENTIMIENTO", "HASHTAGS"]
             )
 
     for target in lista_targets:
@@ -291,3 +323,4 @@ if __name__ == "__main__":
     print("Iniciando procesamiento de posts y sentimiento...")
     iniciar(mis_apis_keys, lista_perfiles)
     print("Proceso completado.")
+    

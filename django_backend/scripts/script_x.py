@@ -2,17 +2,46 @@ import requests
 import csv
 import json
 import os
+import re
+
 from datetime import datetime
 from django_backend.models import ScrapeResult
 from django.utils.timezone import make_aware
 
-def guardar_en_db(target, seguidores, fecha_obj, likes, replies, retweets, vistas, desc):
+def extraer_hashtags(texto):
+    """
+    Extrae todos los hashtags de un texto.
+    Retorna una lista de hashtags sin el símbolo #
+    """
+    if not texto:
+        return []
+
+    hashtags = re.findall(r'#\w+', texto)
+    print(f"Hashtags encontrados: {hashtags}")
+
+    return [tag.lstrip('#') for tag in hashtags]
+
+def guardar_en_db(
+    target,
+    seguidores,
+    fecha_obj,
+    likes,
+    replies,
+    retweets,
+    vistas,
+    desc,
+    hashtags=None
+):
     """
     Inserta los resultados en la base de datos de Django.
     Recibe fecha_obj ya como un objeto datetime.
     """
     try:
-        # Si ya es un objeto datetime, solo nos aseguramos de que sea 'aware'
+        if hashtags is None:
+            hashtags = []
+
+        hashtags_str = ",".join(hashtags) if hashtags else ""
+
         fecha_dt = None
         if fecha_obj:
             if fecha_obj.tzinfo is None:
@@ -21,14 +50,15 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, replies, retweets, vista
                 fecha_dt = fecha_obj
 
         ScrapeResult.objects.create(
-            platform='x',  # CORRECCIÓN: Estaba como 'ig'
+            platform='x',
             username=target,
             followers=seguidores if isinstance(seguidores, int) else 0,
             post_date=fecha_dt,
             likes=likes,
-            comments=replies,  # Mapeamos replies a comments en el modelo
+            comments=replies,
             views=vistas,
-            description=desc
+            description=desc,
+            hashtags=hashtags_str
         )
     except Exception as e:
         print(f"Error al guardar en DB (X/Twitter): {e}")
@@ -67,7 +97,17 @@ def analizar_X_optimizado(keys_user, keys_timeline, lista_targets):
     if not os.path.exists(nombre_csv):
         with open(nombre_csv, mode='w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
-            writer.writerow(['USUARIO', 'CANTIDAD_SEGUIDORES', 'FECHA_POST', 'LIKES', 'REPLIES', 'RETWEETS', 'VISTAS', 'DESCRIPCION'])
+            writer.writerow([
+                'USUARIO',
+                'CANTIDAD_SEGUIDORES',
+                'FECHA_POST',
+                'LIKES',
+                'REPLIES',
+                'RETWEETS',
+                'VISTAS',
+                'DESCRIPCION',
+                'HASHTAGS'
+            ])
 
     for target in lista_targets:
         user_info = cache_ids.get(target)
@@ -112,24 +152,43 @@ def analizar_X_optimizado(keys_user, keys_timeline, lista_targets):
                                 fecha_dt = formatear_fecha_x(tweet.get('created_at'))
                                 fecha_str = fecha_dt.strftime("%d/%m/%Y %H:%M:%S") if fecha_dt else "N/A"
                                 desc = tweet.get('text', '').replace('\n', ' ')
+
+                                # Extraer hashtags
+                                hashtags = extraer_hashtags(desc)
+                                hashtags_csv = ",".join(hashtags)
+
+                                print(f"Hashtags encontrados: {hashtags}")
+                                print(f"Hashtags string: {hashtags_csv}")
                                 
-                                # --- GUARDADO DOBLE ---
-                                # CSV
+                                print(
+                                    f"Datos {target}, {user_info['followers']}, "
+                                    f"{fecha_str}, {desc} | Hashtags: {hashtags}"
+                                )
+
                                 writer.writerow([
-                                    target, user_info['followers'], fecha_str,
-                                    tweet.get('favorites', 0), tweet.get('replies', 0),
-                                    tweet.get('retweets', 0), tweet.get('views', 0), desc
+                                    target,
+                                    user_info['followers'],
+                                    fecha_str,
+                                    tweet.get('favorites', 0),
+                                    tweet.get('replies', 0),
+                                    tweet.get('retweets', 0),
+                                    tweet.get('views', 0),
+                                    desc,
+                                    hashtags_csv
                                 ])
+
                                 guardar_en_db(
-                                target, 
-                                user_info['followers'], 
-                                fecha_dt,
-                                tweet.get('favorites', 0), 
-                                tweet.get('replies', 0),
-                                tweet.get('retweets', 0), 
-                                tweet.get('views', 0), 
-                                desc
-                            )
+                                    target,
+                                    user_info['followers'],
+                                    fecha_dt,
+                                    tweet.get('favorites', 0),
+                                    tweet.get('replies', 0),
+                                    tweet.get('retweets', 0),
+                                    tweet.get('views', 0),
+                                    desc,
+                                    hashtags=hashtags
+                                )
+
                         print(f" ✅ @{target} sincronizado con la base de datos.")
                         exito_timeline = True
                     else:

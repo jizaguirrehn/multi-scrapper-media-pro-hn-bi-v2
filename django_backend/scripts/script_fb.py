@@ -2,6 +2,7 @@ import requests
 import csv
 import json
 import os
+import re
 from datetime import datetime
 
 from django_backend.models import ScrapeResult
@@ -10,8 +11,13 @@ from django.utils.timezone import make_aware
 ARCHIVO_IDS = "usuarios_fb_registrados.json"
 HOY = datetime.now().strftime("%Y_%m_%d")
 
-def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc):
+def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc, hashtags=None):
     try:
+        if hashtags is None:
+            hashtags = []
+
+        hashtags_str = ",".join(hashtags) if hashtags else ""
+
         fecha_dt = None
         if fecha_str and fecha_str != "N/A":
             try:
@@ -28,10 +34,12 @@ def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc
             likes=likes,
             comments=comentarios,
             views=vistas,
-            description=desc
+            description=desc,
+            hashtags=hashtags_str
         )
     except Exception as e:
         print(f"Error crítico al guardar en DB (Facebook): {e}")
+
 
 def cargar_cache_ids():
     if os.path.exists(ARCHIVO_IDS):
@@ -52,7 +60,16 @@ def analizar_facebook_optimizado(api_key, lista_targets):
     if not os.path.exists(nombre_csv):
         with open(nombre_csv, mode='w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
-            writer.writerow(['USUARIO', 'SEGUIDORES', 'FECHA_POST', 'LIKES', 'COMENTARIOS', 'VISTAS', 'DESCRIPCION'])
+            writer.writerow([
+                'USUARIO',
+                'SEGUIDORES',
+                'FECHA_POST',
+                'LIKES',
+                'COMENTARIOS',
+                'VISTAS',
+                'DESCRIPCION',
+                'HASHTAGS'
+            ])
 
     # Headers globales ya que solo usamos una key
     headers = {
@@ -116,9 +133,37 @@ def analizar_facebook_optimizado(api_key, lista_targets):
                                     ts = item.get('timestamp')
                                     fecha_txt = datetime.fromtimestamp(int(ts)).strftime('%d/%m/%Y %H:%M:%S') if ts else "N/A"
                                     desc = item.get('message_rich', '').replace('\n', ' ')
-                                    
-                                    writer.writerow([target, seguidores, fecha_txt, likes, coments, vistas, desc])
-                                    guardar_en_db(target, seguidores, fecha_txt, likes, coments, vistas, desc)
+
+                                    # Extraer hashtags
+                                    hashtags = extraer_hashtags(desc)
+                                    hashtags_csv = ",".join(hashtags)
+
+                                    writer.writerow([
+                                        target,
+                                        seguidores,
+                                        fecha_txt,
+                                        likes,
+                                        coments,
+                                        vistas,
+                                        desc,
+                                        hashtags_csv
+                                    ])
+
+                                    print(
+                                        f"Datos {target}, {seguidores}, {fecha_txt}, "
+                                        f"{likes}, {coments}, {vistas}, {desc} | Hashtags: {hashtags}"
+                                    )
+
+                                    guardar_en_db(
+                                        target,
+                                        seguidores,
+                                        fecha_txt,
+                                        likes,
+                                        coments,
+                                        vistas,
+                                        desc,
+                                        hashtags=hashtags
+                                    )
                         
                         
                         if not cursor:
@@ -130,6 +175,17 @@ def analizar_facebook_optimizado(api_key, lista_targets):
                 except Exception as e:
                     print(f"  Error de conexión en nivel {iteration}: {e}")
                     break
+
+def extraer_hashtags(texto):
+    """
+    Extrae todos los hashtags de un texto.
+    Retorna una lista de hashtags sin el símbolo #
+    """
+    if not texto:
+        return []
+
+    hashtags = re.findall(r'#\w+', texto)
+    return [tag.lstrip('#') for tag in hashtags]
 
 def iniciar_fb(key, lista_perfiles):
     print(f"\n--- INICIANDO MÓDULO FACEBOOK (SINGLE KEY) ---")

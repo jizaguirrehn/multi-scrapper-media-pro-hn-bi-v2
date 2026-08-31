@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import logging
+import re
 from googleapiclient.discovery import build
 from .sentiments.analizador import get_data 
 from dotenv import load_dotenv
@@ -17,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 API_KEY = os.environ.get("KEY")
 youtube = build('youtube', 'v3', developerKey=API_KEY)
+
+def extraer_hashtags(texto):
+    """
+    Extrae todos los hashtags de un texto.
+    Retorna una lista de hashtags sin el símbolo #
+    """
+    if not texto:
+        return []
+
+    hashtags = re.findall(r'#\w+', texto)
+    return [tag.lstrip('#') for tag in hashtags]
 
 def obtener_datos_completos(nombre_canal):
     ai_service = get_data()
@@ -46,6 +58,11 @@ def obtener_datos_completos(nombre_canal):
         cantidad_comentarios = int(v_item['statistics'].get('commentCount', 0))
         descripcion = v_item['snippet'].get('description', 'Sin descripción')
         fecha_pub = v_item['snippet'].get('publishedAt')
+
+        hashtags = extraer_hashtags(descripcion)
+        hashtags_str = ",".join(hashtags)
+
+        logger.info(f"Hashtags encontrados: {hashtags}")
 
         logger.info(f"Procesando Video: {titulo}")
 
@@ -95,6 +112,7 @@ def obtener_datos_completos(nombre_canal):
                 comments    = cantidad_comentarios,
                 views       = vistas,
                 description = descripcion[:5000],
+                hashtags=hashtags_str,
                 
                 sentimiento_global = sentimiento_global,
                 alegria     = pesos['alegria'],

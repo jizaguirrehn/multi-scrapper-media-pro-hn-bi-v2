@@ -2,6 +2,7 @@ import requests
 import csv
 import json
 import os
+import re
 from datetime import datetime
 # Importación del modelo de Django
 from django_backend.models import ScrapeResult
@@ -10,8 +11,25 @@ from django.utils.timezone import make_aware
 ARCHIVO_IDS = "usuarios_tiktok_registrados.json"
 HOY = datetime.now().strftime("%Y_%m_%d")
 
-def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc):
+def extraer_hashtags(texto):
+    """
+    Extrae todos los hashtags de un texto.
+    Retorna una lista de hashtags sin el símbolo #
+    """
+    if not texto:
+        return []
+    # Busca todas las palabras que comienzan con #
+    hashtags = re.findall(r'#\w+', texto)
+    # Remueve el # y devuelve la lista
+    return [tag.lstrip('#') for tag in hashtags]
+
+def guardar_en_db(target, seguidores, fecha_str, likes, comentarios, vistas, desc, hashtags=None):
     try:
+        if hashtags is None:
+            hashtags = []
+        
+        hashtags_str = ",".join(hashtags) if hashtags else ""
+        
         fecha_dt = None
         if fecha_str and fecha_str != "N/A":
             try:
@@ -28,7 +46,8 @@ def guardar_en_db(target, seguidores, fecha_str, likes, comentarios,vistas, desc
             likes=likes,
             comments=comentarios,
             views=vistas,
-            description=desc
+            description=desc,
+            hashtags=hashtags_str
         )
     except Exception as e:
         print(f"Error crítico al guardar en DB (TikTok): {e}")
@@ -54,7 +73,7 @@ def analizar_tiktok_optimizado(keys_search, keys_posts, lista_targets):
     if not os.path.exists(nombre_csv):
         with open(nombre_csv, mode='w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
-            writer.writerow(['USUARIO', 'SEGUIDORES', 'CORAZONES_TOTALES', 'FECHA_POST', 'LIKES_VIDEO', 'VISTAS', 'DESCRIPCION'])
+            writer.writerow(['USUARIO', 'SEGUIDORES', 'CORAZONES_TOTALES', 'FECHA_POST', 'LIKES_VIDEO', 'VISTAS', 'DESCRIPCION', 'HASHTAGS'])
 
     for target in lista_targets:
         info_perfil = cache_uids.get(target)
@@ -113,12 +132,16 @@ def analizar_tiktok_optimizado(keys_search, keys_posts, lista_targets):
                                     fecha_txt = datetime.fromtimestamp(int(ts)).strftime('%d/%m/%Y %H:%M:%S') if ts else "N/A"
                                     descripcion = item.get('title', '').replace('\n', ' ')
                                     
+                                    # Extraer hashtags
+                                    hashtags = extraer_hashtags(descripcion)
+                                    hashtags_csv = ",".join(hashtags)
+                                    
                                     # --- GUARDADO DOBLE ---
                                     # CSV
-                                    writer.writerow([target, seguidores, corazones, fecha_txt, likes, vistas, descripcion])
+                                    writer.writerow([target, seguidores, corazones, fecha_txt, likes, vistas, descripcion, hashtags_csv])
                                     # Base de Datos Django
-                                    print(f"Datos {target}, {seguidores} {fecha_txt}, {likes}, {vistas}, {descripcion}")
-                                    guardar_en_db(target, seguidores, fecha_txt, likes, comentarios,vistas, descripcion)
+                                    print(f"Datos {target}, {seguidores} {fecha_txt}, {likes}, {vistas}, {descripcion} | Hashtags: {hashtags}")
+                                    guardar_en_db(target, seguidores, fecha_txt, likes, comentarios, vistas, descripcion, hashtags=hashtags)
                             
                             print(f"  @{target} procesado y sincronizado con Django.")
                         exito_posts = True
