@@ -10,8 +10,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from django_backend.scripts.script_fb import iniciar_fb
-from .models import ScrapeResult, ScraperKey
-from .serializers import ScrapeResultSerializer, ScraperKeySerializer
+from .models import ScrapeResult, ScraperKey, PostComment
+from .serializers import ScrapeResultSerializer, ScraperKeySerializer, PostCommentSerializer
 from django.db.models import F, ExpressionWrapper, FloatField
 from django.db.models import Count, Avg
 from django.db.models.functions import ExtractWeekDay
@@ -254,6 +254,95 @@ class ScraperViewSet(viewsets.ViewSet):
             
         users = User.objects.all().values('id', 'username', 'first_name', 'email')
         return Response(list(users), status=200)
+    
+    @action(detail=False, methods=['get'], url_path='post-comments')
+    def post_comments(self, request):
+        """
+        Obtiene todos los comentarios de un post específico.
+        Parámetros:
+        - post_id: ID del post en ScrapeResult
+        """
+        post_id = request.query_params.get('post_id')
+        
+        if not post_id:
+            return Response({"error": "Parámetro requerido: post_id"}, status=400)
+        
+        try:
+            post = ScrapeResult.objects.get(id=post_id)
+            comments = PostComment.objects.filter(post=post).order_by('-created_at')
+            serializer = PostCommentSerializer(comments, many=True)
+            return Response({
+                "post_id": post.id,
+                "post_username": post.username,
+                "post_platform": post.platform,
+                "post_description": post.description,
+                "total_comments": comments.count(),
+                "comments": serializer.data
+            }, status=200)
+        except ScrapeResult.DoesNotExist:
+            return Response({"error": "Post no encontrado"}, status=404)
+        except Exception as e:
+            logger.error(f"Error en post_comments: {str(e)}")
+            return Response({"error": str(e)}, status=500)
+    
+    @action(detail=False, methods=['get'], url_path='user-comments')
+    def user_comments(self, request):
+        """
+        Obtiene todos los comentarios de un usuario en todos sus posts.
+        Parámetros:
+        - username: nombre del usuario (ej: 'will')
+        - platform: plataforma (opcional, ej: 'tk', 'ig', 'fb', etc.)
+        - limit: límite de comentarios a retornar (default: 1000)
+        
+        Ejemplo:
+        GET /api/scraper/user-comments/?username=will&platform=tk&limit=50
+        """
+        username = request.query_params.get('username')
+        platform = request.query_params.get('platform')
+        limit = int(request.query_params.get('limit', 1000))
+        
+        if not username:
+            return Response({"error": "Parámetro requerido: username"}, status=400)
+        
+        try:
+            # Obtener todos los posts del usuario
+            posts_query = ScrapeResult.objects.filter(username=username)
+            
+            # Filtrar por plataforma si se proporciona
+            if platform:
+                posts_query = posts_query.filter(platform=platform.lower())
+            
+            posts = posts_query.order_by('-created_at')
+            total_posts = posts.count()
+            
+            if total_posts == 0:
+                return Response({
+                    "username": username,
+                    "platform": platform or "all",
+                    "total_posts": 0,
+                    "total_comments": 0,
+                    "comments": []
+                }, status=200)
+            
+            # Obtener todos los comentarios de todos los posts
+            comments = PostComment.objects.filter(
+                post__in=posts
+            ).order_by('-created_at')[:limit]
+            
+            serializer = PostCommentSerializer(comments, many=True)
+            
+            return Response({
+                "username": username,
+                "platform": platform or "all",
+                "total_posts": total_posts,
+                "total_comments": comments.count(),
+                "limit_applied": limit,
+                "comments": serializer.data
+            }, status=200)
+        
+        except Exception as e:
+            logger.error(f"Error en user_comments: {str(e)}")
+            return Response({"error": str(e)}, status=500)
     
 @api_view(['POST'])
 @permission_classes([AllowAny])

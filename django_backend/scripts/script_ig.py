@@ -4,9 +4,11 @@ import os
 import re
 from datetime import datetime
 import requests
+import pandas as pd
 
-from django_backend.models import ScrapeResult
+from django_backend.models import ScrapeResult, PostComment
 from django.utils.timezone import make_aware
+from .sentiments.analizador import get_data
 
 HOY = datetime.now().strftime("%Y_%m_%d")
 HOST = "instagram-scraper-stable-api.p.rapidapi.com"
@@ -42,7 +44,7 @@ def _obtener_comentarios_post(media_code, lista_keys, key_index):
             "x-rapidapi-host": HOST,
             "Content-Type": "application/json",
         }
-        params = {"media_code": media_code, "sort_order": "popular"}
+        params = {"media_code": media_code, "sort_order": "recent"}
         try:
             response = requests.get(url, headers=headers, params=params, timeout=15)
 
@@ -86,6 +88,7 @@ def extraer_hashtags(texto):
 def analizar_sentimiento(comentarios):
     """
     Procesa la lista de comentarios para determinar métricas de sentimiento.
+    Usa el modelo de Databricks igual que en YouTube.
     """
     pesos = {
         "alegria": 0.0, "confianza": 0.0, "miedo": 0.0, "sorpresa": 0.0,
@@ -96,16 +99,41 @@ def analizar_sentimiento(comentarios):
     if not comentarios:
         return pesos, sentimiento_global
 
-    # Lógica de procesamiento de sentimiento basada en comentarios
+    try:
+        ai_service = get_data()
+        df_comentarios = pd.DataFrame(comentarios, columns=['text'])
+        resultado = ai_service.main(df_comentarios)
+
+        if resultado and 'predictions' in resultado:
+            lista_emociones = [p['detalles_petalos'][0] for p in resultado['predictions']]
+            if lista_emociones:
+                df_preds = pd.DataFrame(lista_emociones)
+                df_numeric = df_preds.apply(pd.to_numeric, errors='coerce')
+                sumas = df_numeric.sum()
+
+                pesos['alegria'] = float(sumas.get('Alegría', 0.0))
+                pesos['confianza'] = float(sumas.get('Confianza', 0.0))
+                pesos['miedo'] = float(sumas.get('Miedo', 0.0))
+                pesos['sorpresa'] = float(sumas.get('Sorpresa', 0.0))
+                pesos['tristeza'] = float(sumas.get('Tristeza', 0.0))
+                pesos['aversion'] = float(sumas.get('Aversión', 0.0))
+                pesos['ira'] = float(sumas.get('Ira', 0.0))
+                pesos['anticipacion'] = float(sumas.get('Anticipación', 0.0))
+                sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
+                return pesos, sentimiento_global
+    except Exception as e:
+        print(f"Error usando Databricks para sentimiento Instagram: {e}")
+
+    # Fallback local
     pesos["alegria"] = round(len(comentarios) * 0.5, 2)
     sentimiento_global = "Positivo" if len(comentarios) > 0 else "Neutral"
-
     return pesos, sentimiento_global
 
 
 def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, hashtags=None, pesos=None, sentimiento_global="N/A"):
     """
     Guarda los resultados del scrapeo y el sentimiento derivado de los comentarios en Django DB.
+    Retorna el objeto ScrapeResult creado.
     """
     try:
         fecha_dt = None
@@ -121,7 +149,7 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, hashtags=No
         # Convertir hashtags a string separado por comas
         hashtags_str = ",".join(hashtags) if hashtags else ""
 
-        ScrapeResult.objects.create(
+        scrape_result = ScrapeResult.objects.create(
             platform='ig',
             username=target,
             followers=seguidores,
@@ -141,8 +169,10 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, hashtags=No
             anticipacion=float(pesos.get("anticipacion", 0.0)) if pesos else 0.0,
         )
         print(f"   [DB Django] Guardado exitoso -> @{target} | Sentimiento: {sentimiento_global} | Hashtags: {hashtags}")
+        return scrape_result
     except Exception as e:
         print(f"Error al guardar en DB (Instagram): {e}")
+        return None
 
 
 def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys, key_index):
@@ -153,6 +183,12 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
 
         for item in posts:
             node = item.get("node", item) if isinstance(item, dict) else {}
+
+            # Filtrar posts anclados
+            pinned_ids = node.get("timeline_pinned_user_ids")
+            if pinned_ids:  # Si tiene valores, es un post anclado, lo saltamos
+                print(f"   [ANCLADO] Post saltado (anclado al perfil)")
+                continue
 
             code = node.get("code") or node.get("shortcode")
             if not code:
@@ -193,7 +229,7 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
             writer.writerow([target, seguidores, fecha_csv, "Post", likes, comms, desc, sentimiento_global, hashtags_csv])
 
             # 4. Persistence real en Django DB
-            guardar_en_db(
+            scrape_result = guardar_en_db(
                 target,
                 seguidores,
                 fecha_dt_obj,
@@ -204,6 +240,19 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
                 pesos=pesos,
                 sentimiento_global=sentimiento_global,
             )
+            
+            # 5. Guardar comentarios relacionados al post
+            if scrape_result and comentarios:
+                for comentario_texto in comentarios:
+                    try:
+                        PostComment.objects.create(
+                            post=scrape_result,
+                            texto=comentario_texto,
+                            platform='ig'
+                        )
+                    except Exception as e:
+                        print(f"Error guardando comentario en DB: {e}")
+                print(f"   [DB Django] {len(comentarios)} comentarios guardados para el post {code}")
 
     return current_key_idx
 

@@ -45,3 +45,17 @@ class ScrapeResult(models.Model):
     class Meta:
         db_table = 'ScrapeResult'
         ordering = ['-created_at']
+
+
+class PostComment(models.Model):
+    post = models.ForeignKey(ScrapeResult, on_delete=models.CASCADE, related_name='comentarios_guardados')
+    texto = models.TextField()
+    platform = models.CharField(max_length=10, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'PostComment'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Comentario en {self.post.username} - {self.platform}"

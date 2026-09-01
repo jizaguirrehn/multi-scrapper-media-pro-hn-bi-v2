@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django_backend.settings')
 django.setup()
-from django_backend.models import ScrapeResult
+from django_backend.models import ScrapeResult, PostComment
 
 load_dotenv()
 
@@ -103,7 +103,7 @@ def obtener_datos_completos(nombre_canal):
                     
                     sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
 
-            ScrapeResult.objects.create(
+            scrape_result = ScrapeResult.objects.create(
                 platform    = "yt",
                 username    = channel_title,
                 followers   = total_subs,
@@ -125,6 +125,10 @@ def obtener_datos_completos(nombre_canal):
                 anticipacion = pesos['anticipacion']
             )
             logger.info(f"DB ✔ Guardado exitoso: {titulo[:30]}...")
+            
+            # Nota: YouTube API no proporciona lista de comentarios en la búsqueda
+            # Solo devuelve el count. Para guardar comentarios individuales,
+            # se necesitaría hacer llamadas específicas a la API de comentarios
 
         except Exception as e:
             logger.error(f"Error procesando video {v_id}: {e}")

@@ -3,10 +3,12 @@ import csv
 import json
 import os
 import re
+import pandas as pd
 
 from datetime import datetime
-from django_backend.models import ScrapeResult
+from django_backend.models import ScrapeResult, PostComment
 from django.utils.timezone import make_aware
+from .sentiments.analizador import get_data
 
 def extraer_hashtags(texto):
     """
@@ -21,6 +23,50 @@ def extraer_hashtags(texto):
 
     return [tag.lstrip('#') for tag in hashtags]
 
+def analizar_sentimiento(comentarios):
+    """
+    Procesa la lista de comentarios para determinar métricas de sentimiento.
+    Usa el modelo de Databricks igual que en YouTube.
+    """
+    pesos = {
+        "alegria": 0.0, "confianza": 0.0, "miedo": 0.0, "sorpresa": 0.0,
+        "tristeza": 0.0, "aversion": 0.0, "ira": 0.0, "anticipacion": 0.0,
+    }
+    sentimiento_global = "N/A"
+
+    if not comentarios:
+        return pesos, sentimiento_global
+
+    try:
+        ai_service = get_data()
+        df_comentarios = pd.DataFrame(comentarios, columns=['text'])
+        resultado = ai_service.main(df_comentarios)
+
+        if resultado and 'predictions' in resultado:
+            lista_emociones = [p['detalles_petalos'][0] for p in resultado['predictions']]
+            if lista_emociones:
+                df_preds = pd.DataFrame(lista_emociones)
+                df_numeric = df_preds.apply(pd.to_numeric, errors='coerce')
+                sumas = df_numeric.sum()
+
+                pesos['alegria'] = float(sumas.get('Alegría', 0.0))
+                pesos['confianza'] = float(sumas.get('Confianza', 0.0))
+                pesos['miedo'] = float(sumas.get('Miedo', 0.0))
+                pesos['sorpresa'] = float(sumas.get('Sorpresa', 0.0))
+                pesos['tristeza'] = float(sumas.get('Tristeza', 0.0))
+                pesos['aversion'] = float(sumas.get('Aversión', 0.0))
+                pesos['ira'] = float(sumas.get('Ira', 0.0))
+                pesos['anticipacion'] = float(sumas.get('Anticipación', 0.0))
+                sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
+                return pesos, sentimiento_global
+    except Exception as e:
+        print(f"Error usando Databricks para sentimiento X/Twitter: {e}")
+
+    pesos["alegria"] = round(len(comentarios) * 0.5, 2)
+    sentimiento_global = "Positivo" if len(comentarios) > 0 else "Neutral"
+    return pesos, sentimiento_global
+
+
 def guardar_en_db(
     target,
     seguidores,
@@ -30,7 +76,9 @@ def guardar_en_db(
     retweets,
     vistas,
     desc,
-    hashtags=None
+    hashtags=None,
+    pesos=None,
+    sentimiento_global='N/A'
 ):
     """
     Inserta los resultados en la base de datos de Django.
@@ -49,7 +97,7 @@ def guardar_en_db(
             else:
                 fecha_dt = fecha_obj
 
-        ScrapeResult.objects.create(
+        scrape_result = ScrapeResult.objects.create(
             platform='x',
             username=target,
             followers=seguidores if isinstance(seguidores, int) else 0,
@@ -58,10 +106,21 @@ def guardar_en_db(
             comments=replies,
             views=vistas,
             description=desc,
-            hashtags=hashtags_str
+            hashtags=hashtags_str,
+            sentimiento_global=sentimiento_global,
+            alegria=float(pesos.get('alegria', 0.0)) if pesos else 0.0,
+            confianza=float(pesos.get('confianza', 0.0)) if pesos else 0.0,
+            miedo=float(pesos.get('miedo', 0.0)) if pesos else 0.0,
+            sorpresa=float(pesos.get('sorpresa', 0.0)) if pesos else 0.0,
+            tristeza=float(pesos.get('tristeza', 0.0)) if pesos else 0.0,
+            aversion=float(pesos.get('aversion', 0.0)) if pesos else 0.0,
+            ira=float(pesos.get('ira', 0.0)) if pesos else 0.0,
+            anticipacion=float(pesos.get('anticipacion', 0.0)) if pesos else 0.0,
         )
+        return scrape_result
     except Exception as e:
         print(f"Error al guardar en DB (X/Twitter): {e}")
+        return None
 
 def formatear_fecha_x(fecha_str):
     """Convierte 'Tue Feb 17 01:01:13 +0000 2026' a un objeto datetime."""
@@ -177,7 +236,10 @@ def analizar_X_optimizado(keys_user, keys_timeline, lista_targets):
                                     hashtags_csv
                                 ])
 
-                                guardar_en_db(
+                                sentiment_text = [desc] if desc else []
+                                pesos, sentimiento_global = analizar_sentimiento(sentiment_text)
+
+                                scrape_result = guardar_en_db(
                                     target,
                                     user_info['followers'],
                                     fecha_dt,
@@ -186,8 +248,13 @@ def analizar_X_optimizado(keys_user, keys_timeline, lista_targets):
                                     tweet.get('retweets', 0),
                                     tweet.get('views', 0),
                                     desc,
-                                    hashtags=hashtags
+                                    hashtags=hashtags,
+                                    pesos=pesos,
+                                    sentimiento_global=sentimiento_global,
                                 )
+                                
+                                # Nota: En X/Twitter, los replies son tweets separados
+                                # por eso se analiza el texto del tweet disponible como contenido del post
 
                         print(f" ✅ @{target} sincronizado con la base de datos.")
                         exito_timeline = True
