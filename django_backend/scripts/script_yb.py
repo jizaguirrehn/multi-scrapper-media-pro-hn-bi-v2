@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'django_backend.settings')
 django.setup()
-from django_backend.models import ScrapeResult, PostComment
+from django_backend.models import ScrapeResult, PostComment, obtener_o_actualizar_usuario
 
 load_dotenv()
 
@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 API_KEY = os.environ.get("KEY")
-youtube = build('youtube', 'v3', developerKey=API_KEY)
+youtube = build('youtube', 'v3', developerKey=API_KEY, cache_discovery=False)
 
 def extraer_hashtags(texto):
     """
@@ -81,7 +81,7 @@ def obtener_datos_completos(nombre_canal):
             
             if comentarios_raw:
                 textos = [c['snippet']['topLevelComment']['snippet']['textDisplay'] for c in comentarios_raw]
-                df_comentarios = pd.DataFrame(textos, columns=['text'])
+                df_comentarios = pd.DataFrame({'text': [str(texto) for texto in textos]})
 
                 resultado = ai_service.main(df_comentarios)
 
@@ -103,9 +103,11 @@ def obtener_datos_completos(nombre_canal):
                     
                     sentimiento_global = resultado['predictions'][0].get('sentimiento_global', 'N/A')
 
+            dim_usuario = obtener_o_actualizar_usuario('yt', channel_title, total_subs)
             scrape_result = ScrapeResult.objects.create(
                 platform    = "yt",
                 username    = channel_title,
+                dim_usuario  = dim_usuario,
                 followers   = total_subs,
                 post_date   = fecha_pub,
                 likes       = likes,

@@ -10,6 +10,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from django_backend.scripts.script_fb import iniciar_fb
+from django_backend.scripts.script_ind_fb import procesar_post_individual_facebook
 from .models import ScrapeResult, ScraperKey, PostComment
 from .serializers import ScrapeResultSerializer, ScraperKeySerializer, PostCommentSerializer
 from django.db.models import F, ExpressionWrapper, FloatField
@@ -25,9 +26,13 @@ import statistics
 logger = logging.getLogger(__name__)
 
 from django_backend.scripts.script_ig import iniciar as iniciar_ig
+from django_backend.scripts.script_ind_ig import procesar_post_individual
 from django_backend.scripts.script_tk import iniciar as iniciar_tk
+from django_backend.scripts.script_ind_tk import procesar_post_individual_tiktok
+from django_backend.scripts.script_ind_x import procesar_post_individual_x
 from django_backend.scripts.script_x import iniciar as iniciar_x
 from django_backend.scripts.script_yb import iniciar_yt
+from django_backend.scripts.script_ind_yb import procesar_post_individual_youtube
 
 class ScraperViewSet(viewsets.ViewSet):
 
@@ -254,6 +259,156 @@ class ScraperViewSet(viewsets.ViewSet):
             
         users = User.objects.all().values('id', 'username', 'first_name', 'email')
         return Response(list(users), status=200)
+
+    @action(detail=False, methods=['get'], url_path='instagram-post')
+    def instagram_post(self, request):
+        post_url = request.query_params.get('post_url')
+        if not post_url:
+            return Response({'error': 'Parámetro requerido: post_url'}, status=400)
+
+        api_key = ScraperKey.objects.filter(
+            platform='ig', is_active=True
+        ).values_list('key_value', flat=True).first()
+        if not api_key:
+            return Response({'error': 'No hay una llave activa de Instagram'}, status=400)
+
+        try:
+            post, total_comments, username, already_exists = procesar_post_individual(
+                post_url, api_key
+            )
+            return Response({
+                'status': 'already_exists' if already_exists else 'created',
+                'post_id': post.id,
+                'username': username,
+                'platform': post.platform,
+                'comments_saved': total_comments,
+                'post': ScrapeResultSerializer(post).data,
+            }, status=200)
+        except Exception as e:
+            logger.error(f'Error procesando post individual de Instagram: {str(e)}')
+            return Response({'error': str(e)}, status=502)
+
+    @action(detail=False, methods=['get'], url_path='tiktok-post')
+    def tiktok_post(self, request):
+        video_id = request.query_params.get('videoId')
+        if not video_id:
+            return Response({'error': 'Parámetro requerido: videoId'}, status=400)
+
+        api_key = ScraperKey.objects.filter(
+            platform='tk', is_active=True
+        ).values_list('key_value', flat=True).first()
+        if not api_key:
+            return Response({'error': 'No hay una llave activa de TikTok'}, status=400)
+
+        try:
+            post, total_comments, username, already_exists = procesar_post_individual_tiktok(
+                video_id, api_key
+            )
+            return Response({
+                'status': 'already_exists' if already_exists else 'created',
+                'post_id': post.id,
+                'video_id': video_id,
+                'username': username,
+                'platform': post.platform,
+                'comments_saved': total_comments,
+                'post': ScrapeResultSerializer(post).data,
+            }, status=200)
+        except Exception as e:
+            logger.error(f'Error procesando video individual de TikTok: {str(e)}')
+            return Response({'error': str(e)}, status=502)
+
+    @action(detail=False, methods=['get'], url_path='x-post')
+    def x_post(self, request):
+        tweet_id = request.query_params.get('tweet_id') or request.query_params.get('id')
+        if not tweet_id:
+            return Response({'error': 'Parámetro requerido: tweet_id'}, status=400)
+
+        api_key = ScraperKey.objects.filter(
+            platform='x', purpose='posts', is_active=True
+        ).values_list('key_value', flat=True).first()
+        if not api_key:
+            api_key = ScraperKey.objects.filter(
+                platform='x', is_active=True
+            ).values_list('key_value', flat=True).first()
+        if not api_key:
+            return Response({'error': 'No hay una llave activa de X'}, status=400)
+
+        try:
+            post, total_comments, username, already_exists = procesar_post_individual_x(
+                tweet_id, api_key
+            )
+            return Response({
+                'status': 'already_exists' if already_exists else 'created',
+                'post_id': post.id,
+                'tweet_id': tweet_id,
+                'username': username,
+                'platform': post.platform,
+                'comments_saved': total_comments,
+                'post': ScrapeResultSerializer(post).data,
+            }, status=200)
+        except Exception as e:
+            logger.error(f'Error procesando tweet individual de X: {str(e)}')
+            return Response({'error': str(e)}, status=502)
+
+    @action(detail=False, methods=['get'], url_path='youtube-post')
+    def youtube_post(self, request):
+        video_id = request.query_params.get('video_id') or request.query_params.get('videoId')
+        if not video_id:
+            return Response({'error': 'Parámetro requerido: video_id'}, status=400)
+
+        api_key = ScraperKey.objects.filter(
+            platform='yt', is_active=True
+        ).values_list('key_value', flat=True).first()
+        if not api_key:
+            import os
+            api_key = os.getenv('KEY')
+        if not api_key:
+            return Response({'error': 'No hay una llave activa de YouTube'}, status=400)
+
+        try:
+            post, total_comments, username, already_exists = procesar_post_individual_youtube(
+                video_id, api_key
+            )
+            return Response({
+                'status': 'already_exists' if already_exists else 'created',
+                'post_id': post.id,
+                'video_id': video_id,
+                'username': username,
+                'platform': post.platform,
+                'comments_saved': total_comments,
+                'post': ScrapeResultSerializer(post).data,
+            }, status=200)
+        except Exception as e:
+            logger.error(f'Error procesando video individual de YouTube: {str(e)}')
+            return Response({'error': str(e)}, status=502)
+
+    @action(detail=False, methods=['get'], url_path='facebook-post')
+    def facebook_post(self, request):
+        post_url = request.query_params.get('post_url')
+        if not post_url:
+            return Response({'error': 'Parámetro requerido: post_url'}, status=400)
+
+        api_key = ScraperKey.objects.filter(
+            platform='fb', is_active=True
+        ).values_list('key_value', flat=True).first()
+        if not api_key:
+            return Response({'error': 'No hay una llave activa de Facebook'}, status=400)
+
+        try:
+            post, total_comments, username, already_exists = procesar_post_individual_facebook(
+                post_url, api_key
+            )
+            return Response({
+                'status': 'already_exists' if already_exists else 'created',
+                'post_id': post.id,
+                'username': username,
+                'platform': post.platform,
+                'comments_saved': total_comments,
+                'post': ScrapeResultSerializer(post).data,
+            }, status=200)
+        except Exception as e:
+            logger.error(f'Error procesando post individual de Facebook: {str(e)}')
+            return Response({'error': str(e)}, status=502)
     
     @action(detail=False, methods=['get'], url_path='post-comments')
     def post_comments(self, request):

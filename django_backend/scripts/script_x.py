@@ -6,7 +6,7 @@ import re
 import pandas as pd
 
 from datetime import datetime
-from django_backend.models import ScrapeResult, PostComment
+from django_backend.models import ScrapeResult, PostComment, obtener_o_actualizar_usuario
 from django.utils.timezone import make_aware
 from .sentiments.analizador import get_data
 
@@ -39,7 +39,7 @@ def analizar_sentimiento(comentarios):
 
     try:
         ai_service = get_data()
-        df_comentarios = pd.DataFrame(comentarios, columns=['text'])
+        df_comentarios = pd.DataFrame({'text': [str(comentario) for comentario in comentarios]})
         resultado = ai_service.main(df_comentarios)
 
         if resultado and 'predictions' in resultado:
@@ -97,9 +97,11 @@ def guardar_en_db(
             else:
                 fecha_dt = fecha_obj
 
+        dim_usuario = obtener_o_actualizar_usuario('x', target, seguidores)
         scrape_result = ScrapeResult.objects.create(
             platform='x',
             username=target,
+            dim_usuario=dim_usuario,
             followers=seguidores if isinstance(seguidores, int) else 0,
             post_date=fecha_dt,
             likes=likes,

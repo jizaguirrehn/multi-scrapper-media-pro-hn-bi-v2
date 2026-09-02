@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 import pandas as pd
 
-from django_backend.models import ScrapeResult, PostComment
+from django_backend.models import ScrapeResult, PostComment, obtener_o_actualizar_usuario
 from django.utils.timezone import make_aware
 from .sentiments.analizador import get_data
 
@@ -32,9 +32,11 @@ def guardar_en_db(target, seguidores, fecha_str, likes, comentarios, vistas, des
             except Exception as e_fecha:
                 print(f"Error parseando fecha {fecha_str}: {e_fecha}")
 
+        dim_usuario = obtener_o_actualizar_usuario('fb', target, seguidores)
         scrape_result = ScrapeResult.objects.create(
             platform='fb',
             username=target,
+            dim_usuario=dim_usuario,
             followers=seguidores if isinstance(seguidores, int) else 0,
             post_date=fecha_dt,
             likes=likes,
@@ -84,10 +86,31 @@ def _obtener_comentarios_post(post_id, headers):
             return comentarios, headers
 
         data = response.json()
-        items = data.get("results") or data.get("comments") or data.get("data") or []
+        os.makedirs("json_logs", exist_ok=True)
+        with open(
+            os.path.join("json_logs", f"facebook_comments_{post_id}.json"),
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
 
-        if isinstance(items, dict):
-            items = items.get("comments") or items.get("results") or []
+        def extraer_items(payload):
+            if isinstance(payload, list):
+                return payload
+            if not isinstance(payload, dict):
+                return []
+
+            for key in ("comments", "results", "data", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+                if isinstance(value, dict):
+                    items_anidados = extraer_items(value)
+                    if items_anidados:
+                        return items_anidados
+            return []
+
+        items = extraer_items(data)
 
         for item in items:
             if not isinstance(item, dict):
@@ -125,7 +148,7 @@ def analizar_sentimiento(comentarios):
 
     try:
         ai_service = get_data()
-        df_comentarios = pd.DataFrame(comentarios, columns=['text'])
+        df_comentarios = pd.DataFrame({'text': [str(comentario) for comentario in comentarios]})
         resultado = ai_service.main(df_comentarios)
 
         if resultado and 'predictions' in resultado:

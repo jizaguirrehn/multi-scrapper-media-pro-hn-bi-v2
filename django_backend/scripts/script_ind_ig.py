@@ -14,9 +14,10 @@ HOY = datetime.now().strftime("%Y_%m_%d")
 HOST = "instagram-scraper-stable-api.p.rapidapi.com"
 JSON_DIR = "json_logs"
 
-
-def _guardar_json_local(categoria, identificador, data):
-    """Guarda las respuestas JSON de las peticiones en carpetas clasificadas."""
+def guardar_json_local(categoria, identificador, data):
+    """
+    Guarda los datos en un archivo JSON local.
+    """
     try:
         folder_path = os.path.join(JSON_DIR, HOY, categoria)
         os.makedirs(folder_path, exist_ok=True)
@@ -25,57 +26,56 @@ def _guardar_json_local(categoria, identificador, data):
         filename = f"{identificador}_{timestamp}.json"
         filepath = os.path.join(folder_path, filename)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
-        print(f"   [JSON] Guardado en: {filepath}")
+        print(f" [JSON] Guardado en: {filepath}")
+
     except Exception as e:
         print(f"Error guardando JSON local para {categoria}/{identificador}: {e}")
 
-
 def _obtener_comentarios_post(media_code, lista_keys, key_index):
-    """Obtiene los comentarios de un post para usarlos en la captura/análisis de sentimiento."""
-    url = f"https://{HOST}/get_post_comments.php"
-    idx = key_index
-    comentarios = []
+        """Obtiene los comentarios de un post para usarlos en la captura/análisis de sentimiento."""
+        url = f"https://{HOST}/get_post_comments.php"
+        idx = key_index
+        comentarios = []
 
-    while idx < len(lista_keys):
-        headers = {
-            "x-rapidapi-key": lista_keys[idx],
-            "x-rapidapi-host": HOST,
-            "Content-Type": "application/json",
-        }
-        params = {"media_code": media_code, "sort_order": "recent"}
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=15)
+        while idx < len(lista_keys):
+            headers = {
+                "x-rapidapi-key": lista_keys[idx],
+                "x-rapidapi-host": HOST,
+                "Content-Type": "application/json",
+            }
+            params = {"media_code": media_code, "sort_order": "recent"}
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=15)
 
-            if response.status_code == 429:
-                print(f"Rate limit (429) en Key índice {idx}. Probando siguiente key...")
+                if response.status_code == 429:
+                    print(f"Rate limit (429) en Key índice {idx}. Probando siguiente key...")
+                    idx += 1
+                    continue
+
+                if response.status_code == 200:
+                    data = response.json()
+                    guardar_json_local("comentarios", media_code, data)
+
+                    comments_list = data.get("comments", []) or data.get("data", {}).get("comments", [])
+                    for comment in comments_list:
+                        texto = comment.get("text", "").strip()
+                        if texto:
+                            comentarios.append(texto)
+                    return comentarios, idx
+
+                break
+            except Exception as e:
+                print(f"Error obteniendo comentarios del post {media_code}: {e}")
                 idx += 1
-                continue
 
-            if response.status_code == 200:
-                data = response.json()
-                _guardar_json_local("comentarios", media_code, data)
-
-                comments_list = data.get("comments", []) or data.get("data", {}).get("comments", [])
-                for comment in comments_list:
-                    texto = comment.get("text", "").strip()
-                    if texto:
-                        comentarios.append(texto)
-                return comentarios, idx
-
-            break
-        except Exception as e:
-            print(f"Error obteniendo comentarios del post {media_code}: {e}")
-            idx += 1
-
-    return comentarios, idx
-
+        return comentarios, idx
 
 def extraer_hashtags(texto):
     """
     Extrae todos los hashtags de un texto.
-    Retorna una lista de hashtags sin el símbolo #
+    Retorna una lista de hashtags sin el simbolo #
     """
     if not texto:
         return []
@@ -84,6 +84,110 @@ def extraer_hashtags(texto):
     # Remueve el # y devuelve la lista
     return [tag.lstrip('#') for tag in hashtags]
 
+def _obtener_info_usuario(username, api_key):
+    url = f"https://{HOST}/ig_get_fb_profile_hover.php"
+    headers = {
+        "x-rapidapi-key": api_key,
+        "x-rapidapi-host": HOST,
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params={"username_or_url": username},
+        timeout=15,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"Error HTTP {response.status_code} obteniendo el usuario @{username}")
+
+    data = response.json()
+    guardar_json_local("usuarios", username, data)
+    return data
+
+def procesar_post_individual(post_url, api_key):
+    """Obtiene, analiza y guarda un único post de Instagram por URL."""
+    url = f"https://{HOST}/get_media_data.php"
+    headers = {
+        "x-rapidapi-key": api_key,
+        "x-rapidapi-host": HOST,
+        "Content-Type": "application/json",
+    }
+    params = {"reel_post_code_or_url": post_url, "type": "post"}
+    
+    response = requests.get(url, headers=headers, params=params, timeout=20)
+    if response.status_code != 200:
+        raise RuntimeError(f"Error HTTP {response.status_code} obteniendo el post")
+
+    post_data = response.json()
+    if post_data.get("error"):
+        raise RuntimeError(str(post_data["error"]))
+
+    guardar_json_local("posts_individuales", post_data.get("code", "post"), post_data)
+
+    user_data = post_data.get("user") or post_data.get("owner") or {}
+    username = (user_data.get("username") or "").strip()
+    if not username:
+        raise ValueError("La respuesta del post no contiene user.username")
+
+    existing_post = ScrapeResult.objects.filter(
+        platform="ig",
+        username=username,
+        raw_data__contains=f'"code": "{post_data.get("code", "")}"',
+    ).first()
+    if existing_post:
+        return existing_post, 0, username, True
+
+    existing_user_post = ScrapeResult.objects.filter(
+        platform="ig",
+        username=username,
+        followers__gt=0,
+    ).order_by("-created_at").first()
+    if existing_user_post:
+        seguidores = existing_user_post.followers
+    else:
+        profile_data = _obtener_info_usuario(username, api_key)
+        profile_user = profile_data.get("user_data", profile_data)
+        seguidores = profile_user.get("follower_count") or profile_user.get("followers", 0) or 0
+
+    caption_data = post_data.get("caption")
+    if isinstance(caption_data, dict):
+        caption = caption_data.get("text", "")
+    elif isinstance(caption_data, str):
+        caption = caption_data
+    else:
+        caption = post_data.get("accessibility_caption", "") or ""
+
+    timestamp = post_data.get("taken_at") or post_data.get("taken_at_timestamp")
+    fecha_obj = datetime.fromtimestamp(timestamp) if timestamp else None
+    code = post_data.get("code") or post_data.get("shortcode")
+    comments, _ = _obtener_comentarios_post(code, [api_key], 0) if code else ([], 0)
+    pesos, sentimiento_global = analizar_sentimiento(comments)
+
+    scrape_result = guardar_en_db(
+        username,
+        seguidores,
+        fecha_obj,
+        (post_data.get("edge_media_preview_like") or {}).get("count", 0),
+        (post_data.get("edge_media_to_comment") or {}).get("count", 0),
+        caption.replace("\n", " "),
+        hashtags=extraer_hashtags(caption),
+        pesos=pesos,
+        sentimiento_global=sentimiento_global,
+    )
+    if not scrape_result:
+        raise RuntimeError("No se pudo guardar el post en la base de datos")
+
+    scrape_result.raw_data = json.dumps(post_data, ensure_ascii=False)
+    scrape_result.save(update_fields=["raw_data"])
+
+    for comentario_texto in comments:
+        PostComment.objects.create(
+            post=scrape_result,
+            texto=comentario_texto,
+            platform="ig",
+        )
+
+    return scrape_result, len(comments), username, False
 
 def analizar_sentimiento(comentarios):
     """
@@ -128,7 +232,6 @@ def analizar_sentimiento(comentarios):
     pesos["alegria"] = round(len(comentarios) * 0.5, 2)
     sentimiento_global = "Positivo" if len(comentarios) > 0 else "Neutral"
     return pesos, sentimiento_global
-
 
 def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, hashtags=None, pesos=None, sentimiento_global="N/A"):
     """
@@ -175,7 +278,6 @@ def guardar_en_db(target, seguidores, fecha_obj, likes, comms, desc, hashtags=No
     except Exception as e:
         print(f"Error al guardar en DB (Instagram): {e}")
         return None
-
 
 def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys, key_index):
     current_key_idx = key_index
@@ -257,121 +359,3 @@ def _guardar_posts_en_csv(nombre_archivo, target, seguidores, posts, lista_keys,
                 print(f"   [DB Django] {len(comentarios)} comentarios guardados para el post {code}")
 
     return current_key_idx
-
-
-def _obtener_info_usuario(target, lista_keys, key_index):
-    url_perfil = f"https://{HOST}/ig_get_fb_profile_hover.php"
-    headers = {
-        "x-rapidapi-key": lista_keys[key_index],
-        "x-rapidapi-host": HOST,
-    }
-    try:
-        response = requests.get(
-            url_perfil,
-            headers=headers,
-            params={"username_or_url": target},
-            timeout=15,
-        )
-        if response.status_code == 200:
-            data = response.json()
-            _guardar_json_local("usuarios", target, data)
-    except Exception as e:
-        print(f"Error obteniendo perfil/usuario de @{target}: {e}")
-
-
-def _procesar_target(target, lista_keys, key_actual_index, nombre_archivo):
-    _obtener_info_usuario(target, lista_keys, key_actual_index)
-
-    url_posts = f"https://{HOST}/get_ig_user_posts.php"
-    target_url = target if target.startswith("http") else f"https://www.instagram.com/{target}/"
-
-    headers = {
-        "x-rapidapi-key": lista_keys[key_actual_index],
-        "x-rapidapi-host": HOST,
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    
-    payload = {
-        "username_or_url": target_url,
-        "pagination_token": "",
-        "amount": "12"
-    }
-
-    try:
-        response = requests.post(url_posts, headers=headers, data=payload, timeout=15)
-
-        if response.status_code == 429:
-            print(f"Rate limit (429) obteniendo posts de @{target}. Cambiando de key...")
-            return False, key_actual_index + 1
-
-        if response.status_code == 200:
-            res_data = response.json()
-
-            if "error" in res_data:
-                print(f"Error devuelto por la API para @{target}: {res_data['error']}")
-                return False, key_actual_index
-
-            _guardar_json_local("posts", target, res_data)
-
-            posts = (
-                res_data.get("posts", [])
-                or res_data.get("items", [])
-                or res_data.get("data", {}).get("items", [])
-            )
-            user_info = res_data.get("user", {}) or {}
-            seguidores = user_info.get("follower_count", 0)
-
-            nuevo_idx = _guardar_posts_en_csv(
-                nombre_archivo,
-                target,
-                seguidores,
-                posts,
-                lista_keys,
-                key_actual_index,
-            )
-            print(f" @{target} procesado exitosamente.\n")
-            return True, nuevo_idx
-
-        print(f"Error HTTP {response.status_code} al procesar @{target}")
-        return False, key_actual_index + 1
-
-    except Exception as e:
-        print(f"Error procesando @{target}: {e}")
-        return False, key_actual_index + 1
-
-
-def analizar_con_rotacion(lista_keys, lista_targets):
-    if not os.path.exists("results"):
-        os.makedirs("results")
-
-    nombre_archivo = f"results/datos_ig_{HOY}.csv"
-    key_actual_index = 0
-
-    if not os.path.exists(nombre_archivo):
-        with open(nombre_archivo, mode="w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.writer(file)
-            writer.writerow(
-                ["USUARIO", "SEGUIDORES", "FECHA", "TIPO", "LIKES", "COMMS", "DESCRIPCION", "SENTIMIENTO", "HASHTAGS"]
-            )
-
-    for target in lista_targets:
-        exito = False
-        while not exito and key_actual_index < len(lista_keys):
-            exito, key_actual_index = _procesar_target(
-                target, lista_keys, key_actual_index, nombre_archivo
-            )
-
-
-def iniciar(mis_apis_keys, lista_perfiles):
-    analizar_con_rotacion(mis_apis_keys, lista_perfiles)
-
-
-if __name__ == "__main__":
-    # Recuerda cargar tus llaves desde variables de entorno para mayor seguridad
-    mis_apis_keys = [os.getenv("RAPIDAPI_KEY", "TU_API_KEY_AQUI")]
-    lista_perfiles = ["aleborjas91"]
-
-    print("Iniciando procesamiento de posts y sentimiento...")
-    iniciar(mis_apis_keys, lista_perfiles)
-    print("Proceso completado.")
-    

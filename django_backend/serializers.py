@@ -1,11 +1,19 @@
 
 from rest_framework import serializers
-from .models import ScrapeResult, ScraperKey, PostComment
+from .models import ScrapeResult, ScraperKey, PostComment, DimUsuario
+
+class DimUsuarioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DimUsuario
+        fields = ['id', 'platform', 'username', 'followers', 'followers_updated_at']
 
 class ScrapeResultSerializer(serializers.ModelSerializer):
+    usuario = DimUsuarioSerializer(source='dim_usuario', read_only=True)
+
     class Meta:
         model = ScrapeResult
         fields = '__all__'
+        read_only_fields = ['usuario']
 
 class ScraperKeySerializer(serializers.ModelSerializer):
     class Meta:
